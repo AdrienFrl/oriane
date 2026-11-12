@@ -1,0 +1,136 @@
+:root {
+  --bg: #0b1020;
+  --panel: #141a2e;
+  --line: #2a3352;
+  --text: #f5f3ee;
+  --muted: #aab1c5;
+  --accent: #f2c14e;
+  --accent-ink: #1a1400;
+  --danger: #ff6b5b;
+  --ok: #5fd38d;
+  --radius: 18px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html { font-size: 18px; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.45;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 18px 6px;
+}
+
+.brand { font-weight: 800; letter-spacing: 0.34em; font-size: 1.25rem; color: var(--accent); }
+
+#status { margin: 0; color: var(--muted); font-size: 0.9rem; text-align: right; }
+
+main { padding: 6px 16px 32px; max-width: 720px; margin: 0 auto; display: grid; gap: 16px; }
+
+h2 { font-size: 1.1rem; margin: 0 0 8px; }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.row > * { flex: 1 1 auto; }
+
+button, input, select { font: inherit; color: var(--text); }
+
+button {
+  min-height: 56px;
+  padding: 10px 16px;
+  border-radius: 14px;
+  border: 2px solid var(--line);
+  background: #1b2340;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:active { transform: scale(0.98); }
+button:disabled { opacity: 0.5; }
+button.danger { border-color: var(--danger); color: var(--danger); }
+
+button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+  outline: 4px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.big {
+  width: 100%;
+  min-height: 132px;
+  font-size: 1.8rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  border-radius: 24px;
+  border: none;
+}
+.primary { background: var(--accent); color: var(--accent-ink); }
+.listening { background: var(--ok); animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 14px rgba(95, 211, 141, 0.25); } }
+
+.hint { color: var(--muted); font-size: 0.88rem; margin: 8px 0; }
+.muted { color: var(--muted); margin: 4px 0; }
+.small { font-size: 0.85rem; }
+
+input[type="search"], input[type="text"], input[type="password"], select {
+  min-height: 52px;
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 2px solid var(--line);
+  background: #0f1529;
+}
+#destForm input { flex: 3 1 200px; }
+#destForm button { flex: 1 0 auto; }
+
+.results { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 8px; }
+.result {
+  width: 100%; text-align: left; display: flex; justify-content: space-between; gap: 12px;
+  background: var(--panel);
+}
+.r-dist { color: var(--muted); white-space: nowrap; font-weight: 500; }
+
+.instr { font-size: 1.5rem; font-weight: 800; margin: 8px 0; }
+.instr.warn { color: var(--danger); }
+
+progress { width: 100%; height: 10px; accent-color: var(--accent); }
+
+#camWrap { position: relative; margin-top: 12px; }
+#camWrap video, #camWrap canvas { width: 100%; height: auto; display: block; border-radius: 14px; }
+#camWrap canvas { position: absolute; inset: 0; pointer-events: none; }
+
+.obstacles { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 4px; }
+.obstacles li { padding: 6px 10px; border-left: 4px solid var(--ok); background: #10172b; border-radius: 6px; }
+.obstacles li.close { border-color: var(--danger); }
+
+details > summary { font-weight: 700; font-size: 1.05rem; cursor: pointer; min-height: 44px; display: flex; align-items: center; }
+
+fieldset { border: 1px solid var(--line); border-radius: 12px; margin: 14px 0 0; padding: 12px; display: grid; gap: 8px; }
+legend { font-weight: 700; padding: 0 6px; color: var(--accent); }
+label { font-size: 0.95rem; }
+.check { display: flex; gap: 10px; align-items: center; min-height: 44px; }
+.check input { width: 24px; height: 24px; accent-color: var(--accent); }
+input[type="range"] { width: 100%; accent-color: var(--accent); min-height: 36px; }
+#btnToggleKey { flex: 0 0 56px; }
+#orsKey { flex: 1 1 200px; }
+
+.log { font-family: ui-monospace, monospace; font-size: 0.78rem; color: var(--muted); padding-left: 18px; max-height: 320px; overflow: auto; }
+
+.disclaimer { color: var(--muted); font-size: 0.8rem; text-align: center; }
+a { color: var(--accent); }

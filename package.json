@@ -1,0 +1,9 @@
+{
+  "name": "oriane",
+  "private": true,
+  "type": "module",
+  "description": "ORIANE — prototype web de guidage piéton vocal et de détection d'obstacles",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}
