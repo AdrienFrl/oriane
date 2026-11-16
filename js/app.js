@@ -1,38 +1,51 @@
-// ORIANE — application : interface, commandes vocales et liaison des modules.
+// ORIANE v2 — application : interface, commandes vocales, détection d'obstacles et guidage.
+// La détection d'obstacles est indépendante du guidage : elle marche avec ou sans destination.
 
 import { Voice, listen, hasRecognition } from './speech.js';
 import { SpatialAudio } from './audio.js';
-import { geocode, reverse, route, landmarks, cleanQuery } from './geo.js';
+import { reverse, route, landmarks } from './geo.js';
+import { findPlaces } from './places.js';
 import { Navigator } from './nav.js';
 import { SimWalker } from './sim.js';
-import { Vision, dirPhrase } from './vision.js';
-import { DepthSensor } from './depth.js';
+import { Vision } from './vision.js';
+import { Perception } from './perception.js';
+import { AlertManager, dirWords } from './alerts.js';
+import { WakeWord } from './wake.js';
 import { store, haversine, fmtDist, norm, angleDiff } from './util.js';
 
 const $ = (s) => document.querySelector(s);
+const VERSION = '2.0';
 
 const DEFAULTS = {
   orsKey: '',
   sim: false,
   simMult: 1,
   voiceRate: 1.05,
-  objSpeech: 'important',
-  announceRange: 8,
+  wakeWord: false,
+  alertRange: 4,
+  corridorWidth: 1.5,
+  vehicleRange: 10,
   beeps: true,
-  beepRange: 6,
+  vibrations: true,
   hrtf: true,
-  depth: false,
+  showVideo: true,
+  showMask: true,
+  camRes: 720,
+  maxFps: 6,
+  engine: 'auto',
   camHeight: 1.3,
   fov: 66,
   calib: 1,
+  // secours COCO-SSD (v1)
+  objSpeech: 'important',
   modelBase: 'lite_mobilenet_v2',
-  showVideo: true,
 };
 const settings = { ...DEFAULTS, ...store.get('settings', {}) };
+settings.announceRange = settings.alertRange; // utilisé par le détecteur de secours
 
 const state = {
   results: [],
-  resIdx: 0,
+  page: 0,
   awaiting: null,
   lastPos: null,
   watchId: null,
@@ -42,11 +55,15 @@ const state = {
   listenTok: 0,
 };
 
-// ---------------- Journal et statut ----------------
+// ---------------- Journal ----------------
 
+const logLines = [];
 function log(msg) {
+  const time = new Date().toLocaleTimeString('fr-FR');
+  logLines.push(`${new Date().toISOString()};${msg.replace(/;/g, ',')}`);
+  if (logLines.length > 2000) logLines.shift();
   const li = document.createElement('li');
-  li.textContent = `${new Date().toLocaleTimeString('fr-FR')} — ${msg}`;
+  li.textContent = `${time} — ${msg}`;
   const ol = $('#log');
   ol.prepend(li);
   while (ol.children.length > 150) ol.lastChild.remove();
@@ -54,15 +71,44 @@ function log(msg) {
 }
 const setStatus = (t) => ($('#status').textContent = t);
 
-// ---------------- Voix et sons ----------------
+// ---------------- Voix, sons, vibrations ----------------
 
 const voice = new Voice();
 const audio = new SpatialAudio();
 voice.onsay = (t) => log('🔊 ' + t);
-voice.onstate = (speaking) => audio.setDuck(speaking);
 const say = (t, o) => voice.say(t, o);
+function vibrate(pattern) {
+  if (settings.vibrations && navigator.vibrate) {
+    try {
+      navigator.vibrate(pattern);
+    } catch {
+      /* non pris en charge */
+    }
+  }
+}
 
-// ---------------- Orientation du téléphone (boussole, inclinaison) ----------------
+// ---------------- Mot d'activation « Dis Oriane » ----------------
+
+const wake = new WakeWord({
+  log,
+  onWake: (rest) => {
+    audio.chime('listen');
+    vibrate([60]);
+    if (rest && rest.length > 1) handleUtterance(rest);
+    else doListen(false);
+  },
+  onError: (why) => {
+    log('Mains libres : ' + why);
+    $('#wakeHint').textContent = 'Micro refusé : autorisez le micro dans Chrome pour utiliser « Dis Oriane ».';
+  },
+});
+voice.onstate = (speaking) => {
+  audio.setDuck(speaking);
+  if (speaking) wake.block('tts');
+  else wake.unblock('tts');
+};
+
+// ---------------- Orientation du téléphone ----------------
 
 let compass = null;
 let beta = null;
@@ -74,12 +120,12 @@ function onOrient(e) {
     h = (h + (screen.orientation?.angle || 0)) % 360;
     compass = compass == null ? h : (compass + angleDiff(compass, h) * 0.3 + 360) % 360;
   }
-  if (e.beta != null) beta = e.beta;
+  if (e.beta != null) beta = beta == null ? e.beta : beta * 0.7 + e.beta * 0.3; // lissage ≈ 300 ms
 }
 window.addEventListener('deviceorientationabsolute', onOrient);
 window.addEventListener('deviceorientation', onOrient);
-/** Inclinaison vers le bas (degrés) en tenant le téléphone verticalement. */
-const getPitch = () => (beta == null ? null : Math.max(-20, Math.min(70, 90 - beta)));
+/** Inclinaison de la caméra vers le bas, en degrés (téléphone tenu verticalement). */
+const getPitch = () => (beta == null ? null : Math.max(-20, Math.min(80, 90 - beta)));
 
 // ---------------- Guidage ----------------
 
@@ -94,24 +140,17 @@ const nav = new Navigator({
     setStatus('Arrivé');
   },
 });
-
 const sim = new SimWalker({ onPos: onPosition, mult: settings.simMult });
 
 function fromCoords(p) {
   return {
-    lat: p.coords.latitude,
-    lon: p.coords.longitude,
-    accuracy: p.coords.accuracy,
-    heading: p.coords.heading,
-    speed: p.coords.speed,
-    t: Date.now(),
+    lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy,
+    heading: p.coords.heading, speed: p.coords.speed, t: Date.now(),
   };
 }
-
 function geoErr(e) {
   return { 1: 'autorisation refusée', 2: 'position introuvable', 3: 'délai dépassé' }[e.code] || e.message;
 }
-
 function getPositionOnce() {
   return new Promise((res, rej) => {
     if (state.lastPos && Date.now() - state.lastPos.t < 15000) return res(state.lastPos);
@@ -126,7 +165,6 @@ function getPositionOnce() {
     );
   });
 }
-
 function onPosition(pos) {
   pos.t = Date.now();
   if (!pos.simulated) {
@@ -139,7 +177,6 @@ function onPosition(pos) {
     : `GPS ± ${Math.round(pos.accuracy)} m${compass != null ? ' · boussole active' : ''}`;
   nav.update(pos);
 }
-
 function startPositionFeed() {
   stopPositionFeed();
   if (settings.sim) {
@@ -154,7 +191,6 @@ function startPositionFeed() {
     );
   }
 }
-
 function stopPositionFeed() {
   sim.stop();
   if (state.watchId != null) navigator.geolocation.clearWatch(state.watchId);
@@ -167,7 +203,7 @@ async function startNavigation(dest) {
   if (nav.active) stopGuidance(false);
   await audio.init();
   setStatus('Calcul de l’itinéraire…');
-  say('Je calcule l’itinéraire.', { priority: 2 });
+  say(`C’est parti pour ${dest.label.split(',')[0]}. Je calcule l’itinéraire.`, { priority: 2 });
   let here;
   try {
     here = await getPositionOnce();
@@ -195,15 +231,12 @@ async function startNavigation(dest) {
   startPositionFeed();
   requestWakeLock();
   setStatus('Guidage en cours');
-  $('#navPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
-
 function loadLandmarks(pts) {
   landmarks(pts)
     .then((l) => nav.setLandmarks(l))
     .catch((e) => log('Repères OpenStreetMap indisponibles : ' + e.message));
 }
-
 async function reroute(pos) {
   if (state.rerouting || !state.dest) return;
   state.rerouting = true;
@@ -218,17 +251,15 @@ async function reroute(pos) {
     state.rerouting = false;
   }
 }
-
 function stopGuidance(speak = true) {
   nav.stop();
   stopPositionFeed();
   $('#navPanel').hidden = true;
   state.dest = null;
   if (speak) say('Guidage arrêté.', { priority: 2 });
-  setStatus('Prêt');
+  setStatus(det.running ? 'Détection active' : 'Prêt');
   releaseWakeLockIfIdle();
 }
-
 function renderNav(u) {
   $('#navInstr').textContent = u.instr;
   $('#navInstr').classList.toggle('warn', !!u.offRoute);
@@ -238,33 +269,36 @@ function renderNav(u) {
 
 // ---------------- Recherche de destination ----------------
 
+const NUM = ['Un', 'Deux', 'Trois'];
+const resultText = (r) => `${r.label}${r.dist != null ? ', à ' + fmtDist(r.dist) : ''}`;
+
 async function searchDestination(text) {
-  const q = cleanQuery(text);
-  if (!q) return;
   await audio.init();
+  state.awaiting = null;
   setStatus('Recherche…');
-  say(`Je cherche ${q}.`, { priority: 2 });
+  say('Je cherche.', { priority: 2 });
   const here = await getPositionOnce().catch(() => null);
-  let res;
+  let found;
   try {
-    res = await geocode(q, here);
+    found = await findPlaces(text, here);
   } catch (e) {
     log('Recherche : ' + e.message);
-    say('La recherche d’adresse ne répond pas. Réessayez dans un instant.', { priority: 3 });
+    say('La recherche ne répond pas. Réessayez dans un instant.', { priority: 3 });
     setStatus('Recherche indisponible');
     return;
   }
-  for (const r of res) r.dist = here ? haversine(here, r) : null;
-  state.results = res;
-  state.resIdx = 0;
+  const { req, results } = found;
+  log(`Recherche : « ${req.name} »${req.city ? ' à ' + req.city : ''}${req.category ? ' (catégorie ' + req.category.label + ')' : ''} → ${results.length} résultat(s).`);
+  state.results = results;
+  state.page = 0;
   renderResults();
-  if (!res.length) {
-    say('Je n’ai trouvé aucun résultat. Essayez avec le nom de la ville.', { priority: 2 });
+  if (!results.length) {
+    say(`Je n’ai rien trouvé pour ${req.name}. Essayez en précisant la ville.`, { priority: 2 });
     setStatus('Aucun résultat');
     return;
   }
-  setStatus(`${res.length} résultat(s)`);
-  proposeResult();
+  setStatus(`${results.length} résultat(s)`);
+  proposePage();
 }
 
 function renderResults() {
@@ -274,28 +308,36 @@ function renderResults() {
     const li = document.createElement('li');
     const b = document.createElement('button');
     b.className = 'result';
-    b.innerHTML = `<span class="r-label"></span><span class="r-dist"></span>`;
+    b.innerHTML = '<span class="r-num"></span><span class="r-label"></span><span class="r-dist"></span>';
+    b.querySelector('.r-num').textContent = i + 1;
     b.querySelector('.r-label').textContent = r.label;
-    b.querySelector('.r-dist').textContent = r.dist != null ? `à ${fmtDist(r.dist)}` : '';
-    b.setAttribute('aria-label', `Y aller : ${r.label}${r.dist != null ? ', à ' + fmtDist(r.dist) : ''}`);
+    b.querySelector('.r-dist').textContent = r.dist != null ? fmtDist(r.dist) : '';
+    b.setAttribute('aria-label', `Y aller : ${resultText(r)}`);
     b.addEventListener('click', () => startNavigation(state.results[i]));
     li.appendChild(b);
     ol.appendChild(li);
   });
 }
 
-async function proposeResult() {
-  const r = state.results[state.resIdx];
-  if (!r) {
+async function proposePage() {
+  const start = state.page;
+  const items = state.results.slice(start, start + 3);
+  if (!items.length) {
     state.awaiting = null;
-    say('Il n’y a pas d’autre résultat. Redites la destination, en précisant la ville.', { priority: 2 });
+    say('Il n’y a pas d’autre proposition. Redites la destination en précisant la ville.', { priority: 2 });
     return;
   }
-  state.awaiting = 'confirm';
-  const intro = state.resIdx === 0 ? 'J’ai trouvé' : 'Résultat suivant';
-  const dist = r.dist != null ? `, à ${fmtDist(r.dist)} à vol d’oiseau` : '';
-  await say(`${intro} : ${r.label}${dist}. Dites oui pour partir, ou non pour le résultat suivant.`, { priority: 2 });
-  if (state.awaiting === 'confirm' && hasRecognition) doListen(false);
+  state.awaiting = 'choose';
+  let text;
+  if (state.results.length === 1) {
+    text = `J’ai trouvé : ${resultText(items[0])}. Dites oui pour partir.`;
+  } else {
+    const head = start === 0 ? `J’ai trouvé ${state.results.length} lieux.` : 'Autres propositions.';
+    const more = state.results.length > start + 3 ? ', ou suivant' : '';
+    text = `${head} ${items.map((r, i) => `${NUM[i]} : ${resultText(r)}.`).join(' ')} Dites oui pour le premier, le numéro de votre choix${more}.`;
+  }
+  await say(text, { priority: 2 });
+  if (state.awaiting === 'choose' && hasRecognition) doListen(false);
 }
 
 // ---------------- Commandes vocales ----------------
@@ -309,6 +351,7 @@ async function doListen(withChime = true) {
   }
   await audio.init();
   voice.stop();
+  wake.block('listen');
   const tok = ++state.listenTok;
   state.listening = true;
   $('#btnTalk').classList.add('listening');
@@ -325,8 +368,9 @@ async function doListen(withChime = true) {
     state.listening = false;
     $('#btnTalk').classList.remove('listening');
     $('#btnTalk').textContent = 'Parler';
+    wake.unblock('listen');
   }
-  if (tok !== state.listenTok) return; // l'utilisateur a agi autrement entre-temps
+  if (tok !== state.listenTok) return;
   if (!alts.length) {
     if (withChime) say('Je n’ai rien entendu.', { priority: 2 });
     return;
@@ -335,33 +379,40 @@ async function doListen(withChime = true) {
   handleUtterance(alts[0]);
 }
 
-function handleUtterance(text) {
-  const t = norm(text);
-  const short = t.split(/\s+/).length <= 7;
+const YES = /^(oui|ouais|ok|okay|d'accord|vas[- ]y|go|on y va|parfait|c'est parti|c'est ca|allons[- ]y|le premier|la premiere|premier|premiere|un|1)\b/;
 
-  if (state.awaiting === 'confirm') {
-    if (/^(oui|ouais|ok|okay|d'accord|vas[- ]y|go|on y va|parfait|c'est ca|confirme|allons[- ]y)\b/.test(t)) {
-      return startNavigation(state.results[state.resIdx]);
+function handleUtterance(text) {
+  const t = norm(text).replace(/[.!?]+$/, '');
+  const words = t.split(/\s+/).length;
+
+  if (state.awaiting === 'choose') {
+    const pick = (i) => {
+      const r = state.results[state.page + i];
+      if (r) startNavigation(r);
+      else say('Ce numéro n’existe pas.', { priority: 2 });
+    };
+    if (YES.test(t)) return pick(0);
+    if (/^(?:le |la )?(?:deux|2|deuxieme|second|seconde)\b/.test(t)) return pick(1);
+    if (/^(?:le |la )?(?:trois|3|troisieme)\b/.test(t)) return pick(2);
+    if (/^(non|suivant|suivants|autres?|d'autres|pas (?:ca|celui))/.test(t)) {
+      state.page += 3;
+      return proposePage();
     }
-    if (/^(non|suivant|autre|pas celui)/.test(t)) {
-      state.resIdx++;
-      return proposeResult();
-    }
-    if (/^(annule|stop|laisse tomber)/.test(t)) {
+    if (/^(annule|stop|laisse tomber|rien)/.test(t)) {
       state.awaiting = null;
       return say('Recherche annulée.', { priority: 2 });
     }
     state.awaiting = null;
   }
 
-  if (short) {
+  if (words <= 8) {
     if (/(repete|redis|repeter)/.test(t)) return nav.repeat();
     if (/(ou suis[- ]je|ou je suis|ou est[- ]ce que je suis|ma position)/.test(t)) return whereAmI();
-    if (/(distance|combien|reste[- ]t[- ]il|il reste)/.test(t)) return say(nav.remainingText(), { priority: 2 });
-    if (/(devant|qu'est[- ]ce qu'il y a|qu'y a[- ]t[- ]il|decris|autour)/.test(t)) return describe();
-    if (/(active|lance|demarre|allume).*(camera|detection)/.test(t)) return startVision();
-    if (/(coupe|desactive|arrete|eteins).*(camera|detection)/.test(t)) return stopVision();
-    if (/(arrete|stop|termine|annule).*(guidage|navigation|itineraire)?$/.test(t) && nav.active) return stopGuidance();
+    if (/(combien|reste[- ]t[- ]il|il reste|distance restante)/.test(t)) return say(nav.remainingText(), { priority: 2 });
+    if (/(devant moi|qu'est[- ]ce qu'il y a|qu'y a[- ]t[- ]il|decris|autour de moi)/.test(t)) return describe();
+    if (/(coupe|desactive|arrete|eteins|stop).*(detection|obstacle|camera)/.test(t)) return stopDetection();
+    if (/(active|lance|demarre|allume|commence|mets?).*(detection|obstacle|camera)/.test(t) || /^(?:la )?detection(?: d'obstacles?)?$/.test(t)) return startDetection();
+    if (/(arrete|stop|termine|annule).*(guidage|navigation|itineraire)/.test(t) || (t === 'stop' && nav.active)) return stopGuidance();
     if (/^(aide|aide[- ]moi|que puis[- ]je dire|commandes)/.test(t)) return help();
   }
   $('#destInput').value = text;
@@ -379,44 +430,36 @@ async function whereAmI() {
 }
 
 function describe() {
-  say(vision.describe(), { priority: 2, interrupt: true });
+  let text = 'La détection n’est pas active. Dites : active la détection.';
+  if (det.running) text = det.mode === 'scene' ? alerts.describe() : vision.describe();
+  say(text, { priority: 2, interrupt: true });
 }
 
 function help() {
   say(
-    'Appuyez sur le bouton Parler, puis dites une adresse, par exemple : 18 rue de Metz à Toulouse. ' +
-      'Pendant le guidage, vous pouvez dire : répète, où suis-je, distance restante, qu’y a-t-il devant moi, ' +
-      'active la détection, ou arrête le guidage.',
+    'Dites « Dis Oriane », ou appuyez sur Parler, puis une destination : un magasin, un lieu ou une adresse, ' +
+      'par exemple Intermarché à Montauban, ou la pharmacie la plus proche. ' +
+      'Vous pouvez aussi dire : active la détection, qu’y a-t-il devant moi, répète, où suis-je, distance restante, ' +
+      'arrête la détection, ou arrête le guidage.',
     { priority: 2, interrupt: true }
   );
 }
 
-// ---------------- Vision et obstacles ----------------
+// ---------------- Détection d'obstacles (indépendante du guidage) ----------------
 
-let objObs = [];
-let depthObs = [];
+const det = { running: false, mode: null, stream: null, tiltSince: null, lastTiltWarn: -Infinity };
+const alerts = new AlertManager(settings);
 
-function pushObstacles() {
-  const merged = [...objObs];
-  for (const d of depthObs) {
-    const dup = objObs.some(
-      (o) => Math.abs(o.angle - d.angle) < 10 && Math.abs(o.distance - d.distance) < Math.max(1, d.distance * 0.35)
-    );
-    if (!dup) merged.push(d);
-  }
-  audio.update(settings.beeps ? merged : []);
-  const ul = $('#obstacles');
-  ul.innerHTML = '';
-  merged
-    .sort((a, b) => a.distance - b.distance)
-    .slice(0, 6)
-    .forEach((o) => {
-      const li = document.createElement('li');
-      li.textContent = `${o.label} · ${dirPhrase(o.angle)} · ${o.distance.toFixed(1).replace('.', ',')} m`;
-      if (o.distance < 2) li.className = 'close';
-      ul.appendChild(li);
-    });
-}
+const perception = new Perception({
+  video: $('#video'),
+  maskCanvas: $('#mask'),
+  overlay: $('#overlay'),
+  settings,
+  getPitch,
+  log,
+  onStatus: (t) => ($('#visionStatus').textContent = t),
+  onResult: onPerception,
+});
 
 const vision = new Vision({
   video: $('#video'),
@@ -425,75 +468,160 @@ const vision = new Vision({
   log,
   settings,
   onObstacles: (o) => {
-    objObs = o;
-    pushObstacles();
+    audio.update(settings.beeps ? o : []);
+    renderObstacles(o.map((x) => ({ label: x.label, angle: x.angle, distance: x.distance, inZone: x.distance <= settings.alertRange })));
   },
   onStatus: (t) => ($('#visionStatus').textContent = t),
 });
 
-const depth = new DepthSensor({
-  video: $('#video'),
-  log,
-  settings,
-  getPitch,
-  onObstacles: (o) => {
-    depthObs = o;
-    pushObstacles();
-  },
-  onStatus: (t) => ($('#visionStatus').textContent = t),
-});
+function onPerception(msg) {
+  const k = settings.calib;
+  const obs = msg.obstacles.map((o) => ({ ...o, distance: o.distance * k, lateral: o.lateral * k, latMin: o.latMin * k, latMax: o.latMax * k }));
+  const curb = msg.curb ? { distance: msg.curb.distance * k } : null;
+  const r = alerts.update(obs, { t: Date.now(), curb, lum: msg.lum });
+  audio.update(settings.beeps ? r.beeps : []);
+  for (const s of r.speech) say(s.text, { priority: s.priority, key: s.key });
+  if (r.vibrate) vibrate(r.vibrate);
+  if (settings.showVideo) perception.drawOverlay(r.tracks, curb);
+  renderObstacles(r.tracks.filter((tr) => tr.misses === 0));
+  checkTilt();
+}
 
-async function startVision() {
-  if (vision.running) return;
+function checkTilt() {
+  const p = getPitch();
+  const now = Date.now();
+  if (p == null || (p > -10 && p < 65)) {
+    det.tiltSince = null;
+    return;
+  }
+  if (det.tiltSince == null) det.tiltSince = now;
+  else if (now - det.tiltSince > 3000 && now - det.lastTiltWarn > 20000) {
+    det.lastTiltWarn = now;
+    say(p >= 65 ? 'Redressez le téléphone : la caméra regarde le sol.' : 'Inclinez légèrement le téléphone vers le sol devant vous.', { priority: 2, key: 'quality' });
+  }
+}
+
+function renderObstacles(list) {
+  const ul = $('#obstacles');
+  ul.innerHTML = '';
+  list
+    .slice()
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 6)
+    .forEach((o) => {
+      const li = document.createElement('li');
+      li.textContent = `${o.label} · ${dirWords(o.angle)} · ${o.distance.toFixed(1).replace('.', ',')} m${o.inZone ? ' · alerte' : ''}`;
+      if (o.distance < 1.5) li.className = 'close';
+      else if (o.inZone) li.className = 'zone';
+      ul.appendChild(li);
+    });
+}
+
+async function openCamera() {
+  if (det.stream) return;
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error('caméra non disponible dans ce navigateur');
+  const res = Number(settings.camRes) || 720;
+  const w = res === 480 ? 854 : 1280;
+  det.stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: 'environment' },
+      width: { ideal: w, max: w },
+      height: { ideal: res, max: res },
+      frameRate: { ideal: 24, max: 30 },
+    },
+    audio: false,
+  });
+  const v = $('#video');
+  v.srcObject = det.stream;
+  await v.play();
+  const tr = det.stream.getVideoTracks()[0];
+  const st = tr?.getSettings?.() || {};
+  log(`Caméra : ${st.width || v.videoWidth} × ${st.height || v.videoHeight}, ${st.frameRate ? Math.round(st.frameRate) + ' images/s' : ''}`);
+}
+function closeCamera() {
+  det.stream?.getTracks().forEach((t) => t.stop());
+  det.stream = null;
+  $('#video').srcObject = null;
+}
+
+async function startDetection() {
+  if (det.running) return say('La détection est déjà active.', { priority: 2 });
   await audio.init();
-  $('#camWrap').hidden = !settings.showVideo;
   $('#btnCamera').disabled = true;
+  $('#camWrap').hidden = !settings.showVideo;
   try {
-    await vision.start();
-    $('#btnCamera').textContent = 'Couper la détection';
-    $('#btnCamera').setAttribute('aria-pressed', 'true');
-    say('Détection activée. Tenez le téléphone devant vous, caméra vers l’avant.', { priority: 2 });
-    if (settings.depth) startDepth();
-    requestWakeLock();
-    requestOrientationPermission();
+    await openCamera();
   } catch (e) {
     log('Caméra : ' + e.message);
     say(`Impossible d’activer la caméra : ${e.message}.`, { priority: 3 });
     $('#camWrap').hidden = true;
-    $('#visionStatus').textContent = 'Caméra indisponible';
-  } finally {
     $('#btnCamera').disabled = false;
+    return;
   }
+  det.running = true;
+  alerts.reset();
+  say('Chargement de la détection.', { priority: 2 });
+  det.mode = settings.engine === 'coco' ? 'coco' : 'scene';
+  if (det.mode === 'scene') {
+    try {
+      await perception.start();
+    } catch (e) {
+      log('Modèle de scène indisponible : ' + e.message);
+      say('Le modèle de scène n’a pas pu se charger. J’utilise le détecteur simplifié.', { priority: 2 });
+      det.mode = 'coco';
+    }
+  }
+  if (!det.running) return; // arrêtée pendant le chargement
+  if (det.mode === 'coco') {
+    try {
+      await vision.start();
+    } catch (e) {
+      log('Détecteur simplifié : ' + e.message);
+      say('La détection n’a pas pu démarrer.', { priority: 3 });
+      stopDetection(false);
+      return;
+    }
+  }
+  $('#btnCamera').disabled = false;
+  $('#btnCamera').textContent = 'Couper la détection';
+  $('#btnCamera').setAttribute('aria-pressed', 'true');
+  say(`Détection activée. Je préviens des obstacles à moins de ${String(settings.alertRange).replace('.', ',')} mètres devant vous.`, { priority: 2 });
+  setStatus(nav.active ? 'Guidage et détection' : 'Détection active');
+  requestWakeLock();
+  requestOrientationPermission();
 }
 
-function startDepth() {
-  depth.start().catch((e) => {
-    log('Profondeur indisponible : ' + e.message);
-    depth.stop();
-  });
-}
-
-function stopVision() {
-  if (!vision.running) return;
-  depth.stop();
-  vision.stop();
-  objObs = [];
-  depthObs = [];
-  pushObstacles();
+function stopDetection(speak = true) {
+  if (!det.running && !det.stream) return;
+  det.running = false;
+  perception.stop();
+  if (vision.running) vision.stop();
+  closeCamera();
+  audio.update([]);
+  renderObstacles([]);
   $('#camWrap').hidden = true;
+  $('#btnCamera').disabled = false;
   $('#btnCamera').textContent = 'Activer la détection';
   $('#btnCamera').setAttribute('aria-pressed', 'false');
-  say('Détection coupée.', { priority: 2 });
+  $('#visionStatus').textContent = 'Caméra inactive';
+  if (speak) say('Détection coupée.', { priority: 2 });
+  setStatus(nav.active ? 'Guidage en cours' : 'Prêt');
   releaseWakeLockIfIdle();
 }
 
 setInterval(() => {
-  if (!vision.running) return;
-  const parts = [`${vision.fps.toFixed(1)} images/s`];
-  if (depth.running && depth.ms) parts.push(`profondeur ${Math.round(depth.ms)} ms`);
+  if (!det.running) return;
+  const parts = [];
+  if (det.mode === 'scene') {
+    const s = perception.stats;
+    parts.push(perception.device === 'webgpu' ? 'Scène · WebGPU' : perception.device === 'wasm' ? 'Scène · processeur' : 'Scène · chargement');
+    if (s.fps) parts.push(`${s.fps.toFixed(1)} analyses/s`, `modèle ${Math.round(s.inferMs)} ms`, `image → alerte ${Math.round(s.latencyMs)} ms`);
+  } else {
+    parts.push('Détecteur simplifié', `${vision.fps.toFixed(1)} images/s`);
+  }
   const p = getPitch();
   if (p != null) parts.push(`inclinaison ${Math.round(p)}°`);
-  $('#visionStatus').textContent = 'Détection active · ' + parts.join(' · ');
+  $('#visionStatus').textContent = parts.join(' · ');
 }, 1000);
 
 // ---------------- Écran allumé, capteurs ----------------
@@ -506,18 +634,16 @@ async function requestWakeLock() {
       wakeLock.addEventListener('release', () => (wakeLock = null));
     }
   } catch {
-    /* refusé : l'écran pourra s'éteindre */
+    /* refusé */
   }
 }
 function releaseWakeLockIfIdle() {
-  if (!nav.active && !vision.running && wakeLock) wakeLock.release().catch(() => {});
+  if (!nav.active && !det.running && !settings.wakeWord && wakeLock) wakeLock.release().catch(() => {});
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && (nav.active || vision.running)) requestWakeLock();
+  if (document.visibilityState === 'visible' && (nav.active || det.running || settings.wakeWord)) requestWakeLock();
 });
-
 async function requestOrientationPermission() {
-  // iOS uniquement ; sur Android la boussole est disponible sans demande.
   try {
     if (typeof DeviceOrientationEvent?.requestPermission === 'function') await DeviceOrientationEvent.requestPermission();
   } catch {
@@ -529,13 +655,36 @@ async function requestOrientationPermission() {
 
 function applySettings() {
   voice.rate = settings.voiceRate;
-  audio.range = settings.beepRange;
+  audio.range = settings.alertRange;
+  settings.announceRange = settings.alertRange;
   if (audio.hrtf !== settings.hrtf) audio.setHrtf(settings.hrtf);
   sim.mult = settings.simMult;
-  $('#camWrap').hidden = !(vision.running && settings.showVideo);
+  $('#camWrap').hidden = !(det.running && settings.showVideo);
+  $('#mask').hidden = !settings.showMask;
+  if (!settings.showMask) {
+    const c = $('#mask');
+    c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  }
   for (const el of document.querySelectorAll('[data-out]')) {
     const v = settings[el.dataset.out];
     el.textContent = typeof v === 'number' ? String(v).replace('.', ',') : v;
+  }
+}
+
+function setWake(on) {
+  if (on) {
+    if (!WakeWord.supported) {
+      $('#wakeHint').textContent = 'Écoute mains libres indisponible dans ce navigateur (utilisez Chrome).';
+      return;
+    }
+    wake.start();
+    requestWakeLock();
+    $('#wakeHint').textContent = 'À l’écoute : dites « Dis Oriane ». L’écran doit rester allumé.';
+    log('Mains libres activé : « Dis Oriane ».');
+  } else {
+    wake.stop();
+    $('#wakeHint').textContent = 'Activez pour lancer ORIANE à la voix, sans toucher l’écran.';
+    releaseWakeLockIfIdle();
   }
 }
 
@@ -544,18 +693,21 @@ function bindSettings() {
     const k = el.dataset.setting;
     if (el.type === 'checkbox') el.checked = !!settings[k];
     else el.value = settings[k];
-    el.addEventListener(el.type === 'range' ? 'input' : 'change', () => {
-      const prevDepth = settings.depth;
-      const prevModel = settings.modelBase;
+    el.addEventListener(el.type === 'range' ? 'input' : 'change', async () => {
+      const prev = settings[k];
       if (el.type === 'checkbox') settings[k] = el.checked;
       else if (el.type === 'range' || el.type === 'number' || el.dataset.num !== undefined) settings[k] = Number(el.value);
       else settings[k] = el.value.trim();
       store.set('settings', settings);
       applySettings();
-      if (k === 'depth' && vision.running && prevDepth !== settings.depth) settings.depth ? startDepth() : depth.stop();
-      if (k === 'modelBase' && prevModel !== settings.modelBase && vision.running) {
-        stopVision();
-        startVision();
+      if (k === 'wakeWord') {
+        await audio.init();
+        setWake(settings.wakeWord);
+      }
+      if ((k === 'engine' || k === 'camRes') && det.running && prev !== settings[k]) {
+        stopDetection(false);
+        if (k === 'engine') perception.dispose();
+        startDetection();
       }
       if (k === 'sim' && nav.active) startPositionFeed();
     });
@@ -569,10 +721,7 @@ $('#btnTalk').addEventListener('click', () => doListen(true));
 $('#destForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const v = $('#destInput').value.trim();
-  if (v) {
-    state.awaiting = null;
-    searchDestination(v);
-  }
+  if (v) handleUtterance(v);
 });
 $('#btnRepeat').addEventListener('click', async () => {
   await audio.init();
@@ -583,7 +732,7 @@ $('#btnWhere').addEventListener('click', async () => {
   await audio.init();
   whereAmI();
 });
-$('#btnCamera').addEventListener('click', () => (vision.running ? stopVision() : startVision()));
+$('#btnCamera').addEventListener('click', () => (det.running ? stopDetection() : startDetection()));
 $('#btnDescribe').addEventListener('click', async () => {
   await audio.init();
   describe();
@@ -594,21 +743,41 @@ $('#btnHelp').addEventListener('click', async () => {
 });
 $('#btnTestSound').addEventListener('click', async () => {
   await audio.init();
-  audio.range = settings.beepRange;
+  audio.range = settings.alertRange;
   say('Test : un obstacle approche par la droite, puis par la gauche.', { priority: 2 });
   setTimeout(() => audio.testSweep(), 2500);
 });
 $('#btnTestVoice').addEventListener('click', async () => {
   await audio.init();
+  vibrate([200]);
   say('Dans 20 mètres, après le feu, tournez à gauche sur la rue de Metz.', { priority: 2, interrupt: true });
 });
 $('#btnToggleKey').addEventListener('click', () => {
   const i = $('#orsKey');
   i.type = i.type === 'password' ? 'text' : 'password';
 });
+$('#btnExportLog').addEventListener('click', () => {
+  const blob = new Blob(['horodatage;message\n' + logLines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `oriane-journal-${new Date().toISOString().slice(0, 16).replace(':', 'h')}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 1000);
+});
 
 bindSettings();
 setStatus('Prêt');
+log(`ORIANE ${VERSION} prêt.`);
 if (!hasRecognition) log('Reconnaissance vocale indisponible : utilisez Chrome sur Android pour la voix.');
-if (!settings.orsKey) log('Pas de clé OpenRouteService : les itinéraires passeront par OSRM (FOSSGIS).');
-log('ORIANE prêt.');
+if (settings.wakeWord) {
+  // Chrome peut exiger un premier geste : le mode mains libres repartira au premier appui sinon.
+  setWake(true);
+  document.addEventListener('pointerdown', () => audio.init(), { once: true });
+}
+
+// Accès pour les tests automatisés
+window.__oriane = { handleUtterance, state, settings, alerts, nav };

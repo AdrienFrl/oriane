@@ -58,7 +58,7 @@ export class SpatialAudio {
     if (!this.ctx) return;
     const now = performance.now();
     const keep = obstacles
-      .filter((o) => o.distance <= this.range)
+      .filter((o) => o.distance <= this.range || o.kind === 'side')
       .sort((a, b) => a.distance - b.distance)
       .slice(0, this.maxSources);
     const ids = new Set(keep.map((o) => o.id));
@@ -127,7 +127,7 @@ export class SpatialAudio {
       if (s.next < t) s.next = t + 0.02;
       while (s.next < t + 0.1) {
         this._beep(s, s.next);
-        s.next += this.interval(s.o.distance);
+        s.next += s.o.kind === 'side' ? 0.9 : this.interval(s.o.distance);
       }
     }
   }
@@ -137,10 +137,10 @@ export class SpatialAudio {
     const closeness = 1 - Math.min(1, d / this.range);
     const osc = this.ctx.createOscillator();
     const g = this.ctx.createGain();
-    const depth = s.o.kind === 'depth';
-    osc.type = depth ? 'triangle' : 'sine';
-    osc.frequency.value = (depth ? 520 : 760) * (1 + 0.6 * closeness);
-    const vol = 0.25 + 0.75 * closeness;
+    const soft = s.o.kind === 'depth' || s.o.kind === 'side';
+    osc.type = soft ? 'triangle' : 'sine';
+    osc.frequency.value = s.o.kind === 'side' ? 440 : (soft ? 520 : 760) * (1 + 0.6 * closeness);
+    const vol = s.o.kind === 'side' ? 0.18 : 0.25 + 0.75 * closeness;
     const dur = d < 1.2 ? 0.05 : 0.07;
     g.gain.setValueAtTime(0.0001, when);
     g.gain.linearRampToValueAtTime(vol, when + 0.006);

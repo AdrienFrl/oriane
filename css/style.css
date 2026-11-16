@@ -134,3 +134,19 @@ input[type="range"] { width: 100%; accent-color: var(--accent); min-height: 36px
 
 .disclaimer { color: var(--muted); font-size: 0.8rem; text-align: center; }
 a { color: var(--accent); }
+
+/* ---------- v2 ---------- */
+.ver { font-size: 0.7rem; letter-spacing: 0.1em; color: var(--muted); vertical-align: super; }
+.wake { margin-top: 10px; font-weight: 600; }
+#camWrap { position: relative; margin-top: 12px; overflow: hidden; border-radius: 14px; }
+#camWrap video { width: 100%; height: auto; display: block; }
+#camWrap #mask { position: absolute; left: 0; width: 100%; pointer-events: none; image-rendering: auto; }
+#camWrap #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.obstacles li.zone { border-color: var(--accent); }
+.result { align-items: center; }
+.r-num { flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-weight: 800; }
+.r-label { flex: 1 1 auto; }
+.legend { margin-top: 10px; font-size: 0.85rem; color: var(--muted); }
+.legend ul { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px; }
+.sw { display: inline-block; width: 14px; height: 14px; border-radius: 3px; margin-right: 8px; vertical-align: middle; }
+#btnExportLog { margin: 8px 0; }

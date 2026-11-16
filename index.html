@@ -4,30 +4,33 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0b1020" />
-  <meta name="description" content="ORIANE — guidage piéton vocal et détection d'obstacles pour personnes aveugles et malvoyantes (prototype)." />
-  <title>ORIANE — prototype</title>
+  <meta name="description" content="ORIANE — guidage piéton vocal et détection d'obstacles pour personnes aveugles et malvoyantes (prototype v2)." />
+  <title>ORIANE v2 — prototype</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/style.css?v=2" />
 </head>
 <body>
   <header>
-    <div class="brand" aria-label="Oriane">ORIANE</div>
+    <div class="brand" aria-label="Oriane, version 2">ORIANE <span class="ver">v2</span></div>
     <p id="status" role="status" aria-live="polite">Chargement…</p>
   </header>
 
   <main>
     <section aria-labelledby="h-dest">
-      <h2 id="h-dest" class="sr-only">Destination</h2>
+      <h2 id="h-dest" class="sr-only">Destination et commandes</h2>
       <button id="btnTalk" class="big primary" aria-describedby="talkHint">Parler</button>
-      <p id="talkHint" class="hint">Dites une adresse (« 18 rue de Metz à Toulouse ») ou une commande (« répète », « où suis-je », « qu'y a-t-il devant moi »).</p>
+      <p id="talkHint" class="hint">Dites un lieu (« Intermarché à Montauban », « la pharmacie la plus proche », « 18 rue de Metz à Toulouse ») ou une commande (« active la détection », « qu'y a-t-il devant moi », « répète »).</p>
+
+      <label class="check wake"><input type="checkbox" data-setting="wakeWord" /> Mains libres : « Dis Oriane »</label>
+      <p id="wakeHint" class="hint">Activez pour lancer ORIANE à la voix, sans toucher l'écran.</p>
 
       <form id="destForm" class="row">
-        <label for="destInput" class="sr-only">Destination écrite</label>
-        <input id="destInput" type="search" inputmode="search" autocomplete="off" placeholder="Ou tapez une destination" />
-        <button type="submit">Chercher</button>
+        <label for="destInput" class="sr-only">Destination ou commande écrite</label>
+        <input id="destInput" type="search" inputmode="search" autocomplete="off" placeholder="Ou tapez un lieu ou une commande" />
+        <button type="submit">Envoyer</button>
       </form>
-      <ol id="results" class="results" aria-label="Résultats de recherche"></ol>
+      <ol id="results" class="results" aria-label="Lieux trouvés"></ol>
     </section>
 
     <section id="navPanel" class="panel" aria-labelledby="h-nav" hidden>
@@ -45,6 +48,7 @@
 
     <section class="panel" aria-labelledby="h-vision">
       <h2 id="h-vision">Détection d'obstacles</h2>
+      <p class="hint">Fonctionne avec ou sans guidage. Alerte seulement à moins de <output data-out="alertRange"></output> m, sur votre chemin.</p>
       <div class="row">
         <button id="btnCamera" aria-pressed="false">Activer la détection</button>
         <button id="btnDescribe">Qu'y a-t-il devant ?</button>
@@ -52,9 +56,25 @@
       <p id="visionStatus" class="muted small">Caméra inactive</p>
       <div id="camWrap" hidden>
         <video id="video" playsinline muted></video>
+        <canvas id="mask" aria-hidden="true"></canvas>
         <canvas id="overlay" aria-hidden="true"></canvas>
       </div>
       <ul id="obstacles" class="obstacles" aria-label="Obstacles détectés"></ul>
+      <details class="legend">
+        <summary>Légende des couleurs</summary>
+        <ul>
+          <li><span class="sw" style="background:#3cc878"></span>sol praticable</li>
+          <li><span class="sw" style="background:#f05a46"></span>mur, barrière</li>
+          <li><span class="sw" style="background:#faaa28"></span>porte</li>
+          <li><span class="sw" style="background:#50c8fa"></span>vitre, porte vitrée</li>
+          <li><span class="sw" style="background:#ff3cc8"></span>poteau, lampadaire, panneau</li>
+          <li><span class="sw" style="background:#b4783c"></span>poubelle</li>
+          <li><span class="sw" style="background:#fadc3c"></span>mobilier</li>
+          <li><span class="sw" style="background:#aa5afa"></span>escalier ; pointillés violets : bord de trottoir</li>
+          <li><span class="sw" style="background:#ffffff"></span>personne ; <span class="sw" style="background:#fa3c3c"></span>véhicule</li>
+          <li>Zone jaune : couloir de marche surveillé</li>
+        </ul>
+      </details>
     </section>
 
     <section class="row">
@@ -66,6 +86,49 @@
       <summary>Réglages</summary>
 
       <fieldset>
+        <legend>Alertes d'obstacles</legend>
+        <label for="alertRange">Distance d'alerte : <output data-out="alertRange"></output> m</label>
+        <input id="alertRange" type="range" min="2" max="6" step="0.5" data-setting="alertRange" />
+        <label for="corridorWidth">Largeur du couloir surveillé : <output data-out="corridorWidth"></output> m</label>
+        <input id="corridorWidth" type="range" min="1" max="2" step="0.1" data-setting="corridorWidth" />
+        <label class="check"><input type="checkbox" data-setting="beeps" /> Bips spatialisés</label>
+        <label class="check"><input type="checkbox" data-setting="vibrations" /> Vibrations (mobilier, urgence)</label>
+        <label class="check"><input type="checkbox" data-setting="hrtf" /> Son 3D (HRTF) — sinon stéréo simple</label>
+        <p class="hint">Utilisez des écouteurs stéréo, idéalement ouverts ou à conduction osseuse.</p>
+        <button id="btnTestSound" type="button">Tester les sons</button>
+      </fieldset>
+
+      <fieldset>
+        <legend>Caméra et analyse</legend>
+        <label class="check"><input type="checkbox" data-setting="showVideo" /> Afficher l'image de la caméra</label>
+        <label class="check"><input type="checkbox" data-setting="showMask" /> Afficher les zones reconnues (couleurs)</label>
+        <label for="camRes">Qualité vidéo</label>
+        <select id="camRes" data-setting="camRes" data-num>
+          <option value="720">720p (recommandé)</option>
+          <option value="480">480p (plus léger)</option>
+        </select>
+        <label for="maxFps">Analyses par seconde (maximum)</label>
+        <select id="maxFps" data-setting="maxFps" data-num>
+          <option value="4">4 (économe)</option>
+          <option value="6">6 (recommandé)</option>
+          <option value="8">8 (réactif)</option>
+        </select>
+        <label for="engine">Moteur de détection</label>
+        <select id="engine" data-setting="engine">
+          <option value="auto">Scène complète, processeur graphique si possible (recommandé)</option>
+          <option value="wasm">Scène complète, processeur seul</option>
+          <option value="coco">Détecteur simplifié v1 (objets courants seulement)</option>
+        </select>
+        <label for="camHeight">Hauteur du téléphone : <output data-out="camHeight"></output> m</label>
+        <input id="camHeight" type="range" min="0.8" max="1.9" step="0.05" data-setting="camHeight" />
+        <label for="fov">Champ de vision de la caméra : <output data-out="fov"></output>°</label>
+        <input id="fov" type="range" min="45" max="95" step="1" data-setting="fov" />
+        <label for="calib">Correction des distances : × <output data-out="calib"></output></label>
+        <input id="calib" type="range" min="0.5" max="2" step="0.05" data-setting="calib" />
+        <p class="hint">Tenez le téléphone à la poitrine, caméra vers l'avant et légèrement vers le sol. Placez un objet à 3 m et ajustez la correction jusqu'à lire 3 m.</p>
+      </fieldset>
+
+      <fieldset>
         <legend>Itinéraire</legend>
         <label for="orsKey">Clé OpenRouteService (facultative, gratuite)</label>
         <div class="row">
@@ -73,8 +136,7 @@
           <button id="btnToggleKey" type="button" aria-label="Afficher ou masquer la clé">👁</button>
         </div>
         <p class="hint">Sans clé, l'itinéraire est calculé par OSRM (FOSSGIS). Clé gratuite sur
-          <a href="https://openrouteservice.org/dev/#/signup" target="_blank" rel="noopener">openrouteservice.org</a>.
-          Elle reste enregistrée sur ce téléphone uniquement.</p>
+          <a href="https://openrouteservice.org/dev/#/signup" target="_blank" rel="noopener">openrouteservice.org</a>.</p>
         <label class="check"><input type="checkbox" data-setting="sim" /> Simulation de marche (tester sans sortir)</label>
         <label for="simMult">Vitesse de simulation</label>
         <select id="simMult" data-setting="simMult" data-num>
@@ -88,55 +150,21 @@
         <legend>Voix</legend>
         <label for="voiceRate">Débit de la voix : <output data-out="voiceRate"></output></label>
         <input id="voiceRate" type="range" min="0.7" max="1.8" step="0.05" data-setting="voiceRate" />
-        <label for="objSpeech">Annonce des objets</label>
-        <select id="objSpeech" data-setting="objSpeech">
-          <option value="important">Objets importants (véhicules, personnes, mobilier urbain)</option>
-          <option value="all">Tous les objets reconnus</option>
-          <option value="off">Aucune (bips seulement)</option>
-        </select>
-        <label for="announceRange">Annoncer les objets jusqu'à : <output data-out="announceRange"></output> m</label>
-        <input id="announceRange" type="range" min="3" max="15" step="1" data-setting="announceRange" />
-        <button id="btnTestVoice" type="button">Tester la voix</button>
-      </fieldset>
-
-      <fieldset>
-        <legend>Sons spatialisés</legend>
-        <label class="check"><input type="checkbox" data-setting="beeps" /> Bips d'obstacles</label>
-        <label for="beepRange">Portée des bips : <output data-out="beepRange"></output> m</label>
-        <input id="beepRange" type="range" min="2" max="10" step="0.5" data-setting="beepRange" />
-        <label class="check"><input type="checkbox" data-setting="hrtf" /> Son 3D (HRTF) — sinon stéréo simple</label>
-        <p class="hint">Utilisez des écouteurs stéréo, idéalement ouverts ou à conduction osseuse.</p>
-        <button id="btnTestSound" type="button">Tester les sons</button>
-      </fieldset>
-
-      <fieldset>
-        <legend>Caméra et distances</legend>
-        <label class="check"><input type="checkbox" data-setting="showVideo" /> Afficher l'image de la caméra</label>
-        <label for="modelBase">Modèle de détection</label>
-        <select id="modelBase" data-setting="modelBase">
-          <option value="lite_mobilenet_v2">Rapide (recommandé)</option>
-          <option value="mobilenet_v2">Précis (plus lent)</option>
-        </select>
-        <label class="check"><input type="checkbox" data-setting="depth" /> Profondeur par IA (expérimental, ≈ 30 Mo)</label>
-        <label for="camHeight">Hauteur du téléphone : <output data-out="camHeight"></output> m</label>
-        <input id="camHeight" type="range" min="0.8" max="1.8" step="0.05" data-setting="camHeight" />
-        <label for="fov">Champ de vision de la caméra : <output data-out="fov"></output>°</label>
-        <input id="fov" type="range" min="45" max="95" step="1" data-setting="fov" />
-        <label for="calib">Correction des distances : × <output data-out="calib"></output></label>
-        <input id="calib" type="range" min="0.5" max="2" step="0.05" data-setting="calib" />
-        <p class="hint">Placez quelqu'un à 3 m devant vous et ajustez la correction jusqu'à lire 3 m.</p>
+        <button id="btnTestVoice" type="button">Tester la voix et la vibration</button>
       </fieldset>
     </details>
 
     <details class="panel">
       <summary>Journal</summary>
+      <button id="btnExportLog" type="button">Exporter le journal (CSV)</button>
       <ol id="log" class="log"></ol>
     </details>
 
     <p class="disclaimer">Prototype d'étude. ORIANE complète la canne blanche ou le chien guide, il ne les remplace pas.
+      L'absence d'alerte ne garantit pas l'absence d'obstacle. Les images restent sur le téléphone.
       Données cartographiques © contributeurs <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>.</p>
   </main>
 
-  <script type="module" src="js/app.js"></script>
+  <script type="module" src="js/app.js?v=2"></script>
 </body>
 </html>

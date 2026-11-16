@@ -85,12 +85,15 @@ export class Vision {
 
   async start() {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('caméra non disponible dans ce navigateur');
-    this.onStatus?.('Ouverture de la caméra…');
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: false,
-    });
-    this.video.srcObject = this.stream;
+    if (!this.video.srcObject) {
+      this.onStatus?.('Ouverture de la caméra…');
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 } },
+        audio: false,
+      });
+      this.video.srcObject = this.stream;
+      this.ownStream = true;
+    }
     await this.video.play();
     if (!this.model || this.modelBase !== this.settings.modelBase) {
       this.onStatus?.('Chargement du modèle de détection (une seule fois)…');
@@ -108,9 +111,12 @@ export class Vision {
 
   stop() {
     this.running = false;
-    this.stream?.getTracks().forEach((t) => t.stop());
+    if (this.ownStream) {
+      this.stream?.getTracks().forEach((t) => t.stop());
+      this.video.srcObject = null;
+      this.ownStream = false;
+    }
     this.stream = null;
-    this.video.srcObject = null;
     this.tracks = [];
     this.onObstacles?.([]);
     const ctx = this.canvas.getContext('2d');

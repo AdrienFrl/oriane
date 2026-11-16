@@ -48,8 +48,8 @@ export class Voice {
       let i = this.queue.findIndex((it) => it.priority < priority);
       if (i < 0) i = this.queue.length;
       this.queue.splice(i, 0, item);
-      // Une alerte coupe une simple information en cours.
-      if (this.current && priority >= 3 && this.current.priority <= 1) speechSynthesis.cancel();
+      // Une alerte (priorité 3) coupe un message moins prioritaire en cours.
+      if (this.current && priority >= 3 && this.current.priority < priority) speechSynthesis.cancel();
       // Évite l'accumulation de vieux messages d'information.
       while (this.queue.length > 4) {
         const idx = this.queue.map((q) => q.priority).lastIndexOf(1);

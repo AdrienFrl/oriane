@@ -5,7 +5,7 @@
 
 import { Polyline } from './util.js';
 
-async function fetchJSON(url, opts = {}, timeoutMs = 15000) {
+export async function fetchJSON(url, opts = {}, timeoutMs = 15000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -44,7 +44,7 @@ export function cleanQuery(q) {
     .trim();
 }
 
-function photonLabel(p) {
+export function photonLabel(p) {
   const parts = [];
   const street = [p.housenumber, p.street].filter(Boolean).join(' ');
   if (p.name && p.name !== p.street) parts.push(p.name);
