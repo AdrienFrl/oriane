@@ -44,6 +44,16 @@ Spécification détaillée et critères d'acceptation : FON-20 à FON-41, NFR-20
 - Testeurs aveugles ou malvoyants à trouver (côté Adrien).
 - Après la v2.2 : Kotlin Multiplatform + Android, démo ordinateur, lunettes AG18 (spécification confidentielle dans le Projet Claude, plan de validation A.8), iOS.
 
+## Reprise du 20/11/2026 (Claude Code)
+
+- Reprise vérifiée : 31 tests verts, cahier des charges § 15 relu (FON-20 à FON-41, NFR-20 à NFR-24).
+- Constats complémentaires :
+  - le lissage de `beta` dans `app.js` (0,7 / 0,3 à chaque événement, ≈ 60 Hz) ne dure qu'environ 50 ms, pas 300 ms : il ne filtre pas l'oscillation des pas ;
+  - `VIB` n'a que 3 motifs, FON-32 en demande 4 (manque « double = obstacle sur le chemin ») ;
+  - le script e2e sera recréé avec Playwright (Chromium préinstallé dans l'environnement cloud).
+- Choix pour le rejeu (FON-40) : enregistrer aussi la carte de segmentation, pour un rejeu identique à chaque passage, même sans WebGPU.
+- Travail sur la branche `claude/tender-hawking-omq7tk`, à fusionner dans `main` pour publier sur GitHub Pages.
+
 ## Pour lancer les tests
 
 ```bash
