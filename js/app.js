@@ -21,6 +21,7 @@ const DEFAULTS = {
   sim: false,
   simMult: 1,
   voiceRate: 1.05,
+  voiceURI: '',
   wakeWord: false,
   alertRange: 4,
   corridorWidth: 1.5,
@@ -76,6 +77,41 @@ const setStatus = (t) => ($('#status').textContent = t);
 const voice = new Voice();
 const audio = new SpatialAudio();
 voice.onsay = (t) => log('🔊 ' + t);
+voice.setPreferred(settings.voiceURI);
+let voiceWarned = false;
+voice.onerror = (code, text) => {
+  log(`⚠️ Voix muette (${code}) pour : « ${text.slice(0, 60)} »`);
+  const box = $('#voiceWarn');
+  box.hidden = false;
+  if (!voiceWarned) {
+    voiceWarned = true;
+    vibrate([300, 150, 300, 150, 300]);
+  }
+};
+function fillVoices() {
+  const sel = $('#voiceSel');
+  const keep = settings.voiceURI;
+  sel.innerHTML = '';
+  const add = (value, label) => {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    sel.appendChild(o);
+  };
+  add('', 'Automatique (voix française du téléphone)');
+  add('system', 'Moteur par défaut, sans choisir de voix');
+  for (const v of voice.frenchVoices) add(v.voiceURI, `${v.name} — ${v.lang}${v.localService ? '' : ' (en ligne)'}`);
+  sel.value = [...sel.options].some((o) => o.value === keep) ? keep : '';
+  renderVoiceDiag();
+}
+function renderVoiceDiag() {
+  const d = voice.diagnose();
+  $('#voiceDiag').textContent = !d.supported
+    ? 'Synthèse vocale absente de ce navigateur.'
+    : `${d.total} voix sur le téléphone, dont ${d.french.length} en français. Voix utilisée : ${d.chosen}.` +
+      (d.failures ? ` Échecs : ${d.failures}.` : '');
+}
+voice.onvoices = fillVoices;
 const say = (t, o) => voice.say(t, o);
 function vibrate(pattern) {
   if (settings.vibrations && navigator.vibrate) {
@@ -750,7 +786,25 @@ $('#btnTestSound').addEventListener('click', async () => {
 $('#btnTestVoice').addEventListener('click', async () => {
   await audio.init();
   vibrate([200]);
-  say('Dans 20 mètres, après le feu, tournez à gauche sur la rue de Metz.', { priority: 2, interrupt: true });
+  say('Test de la voix. Poteau devant, 3 mètres.', { priority: 2, interrupt: true });
+  const d = voice.diagnose();
+  log(`Diagnostic voix : ${d.total} voix, françaises : ${d.french.join(' ; ') || 'aucune'} ; utilisée : ${d.chosen}.`);
+  setTimeout(renderVoiceDiag, 4500);
+});
+$('#voiceSel').addEventListener('change', (e) => {
+  settings.voiceURI = e.target.value;
+  store.set('settings', settings);
+  voice.setPreferred(settings.voiceURI);
+  $('#voiceWarn').hidden = true;
+  voice.failures = 0;
+  renderVoiceDiag();
+  say('Voix changée. Poteau devant, 3 mètres.', { priority: 2, interrupt: true });
+});
+$('#btnVoiceHelp').addEventListener('click', () => {
+  $('#voiceWarn').hidden = true;
+  const r = document.querySelector('details.settings');
+  if (r) r.open = true;
+  $('#voiceSel').scrollIntoView({ behavior: 'smooth', block: 'center' });
 });
 $('#btnToggleKey').addEventListener('click', () => {
   const i = $('#orsKey');
@@ -770,6 +824,7 @@ $('#btnExportLog').addEventListener('click', () => {
 });
 
 bindSettings();
+fillVoices();
 setStatus('Prêt');
 log(`ORIANE ${VERSION} prêt.`);
 if (!hasRecognition) log('Reconnaissance vocale indisponible : utilisez Chrome sur Android pour la voix.');

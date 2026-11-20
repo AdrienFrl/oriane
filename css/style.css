@@ -150,3 +150,6 @@ a { color: var(--accent); }
 .legend ul { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px; }
 .sw { display: inline-block; width: 14px; height: 14px; border-radius: 3px; margin-right: 8px; vertical-align: middle; }
 #btnExportLog { margin: 8px 0; }
+
+.warnbox { background: #3a1414; border: 2px solid var(--danger); border-radius: 14px; padding: 14px; line-height: 1.45; }
+.warnbox button { display: block; margin-top: 10px; width: 100%; }

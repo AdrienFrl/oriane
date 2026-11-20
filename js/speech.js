@@ -16,18 +16,52 @@ export class Voice {
     this.onstate = null;
     this.onsay = null;
     this._token = 0;
+    this.voices = [];
+    this.preferredURI = '';
+    this.onerror = null; // (code, texte) : échec de la synthèse
+    this.failures = 0;
+    this.successes = 0;
     if (this.supported) {
-      const pick = () => {
-        const vs = speechSynthesis.getVoices();
-        this.voice =
-          vs.find((v) => /^fr[-_]FR/i.test(v.lang) && /google/i.test(v.name)) ||
-          vs.find((v) => /^fr[-_]FR/i.test(v.lang)) ||
-          vs.find((v) => /^fr/i.test(v.lang)) ||
-          null;
+      const load = () => {
+        this.voices = speechSynthesis.getVoices();
+        this.pick();
+        this.onvoices?.(this.voices);
       };
-      pick();
-      speechSynthesis.addEventListener?.('voiceschanged', pick);
+      load();
+      speechSynthesis.addEventListener?.('voiceschanged', load);
     }
+  }
+
+  /** Voix françaises disponibles (locales d'abord : elles marchent sans réseau). */
+  get frenchVoices() {
+    return this.voices
+      .filter((v) => /^fr/i.test(v.lang))
+      .sort((a, b) => Number(b.localService) - Number(a.localService) || Number(/fr[-_]FR/i.test(b.lang)) - Number(/fr[-_]FR/i.test(a.lang)));
+  }
+
+  /** Choisit la voix : celle demandée, sinon une voix française locale, sinon aucune (moteur par défaut). */
+  pick() {
+    const pref = this.preferredURI && this.voices.find((v) => v.voiceURI === this.preferredURI);
+    if (pref) return (this.voice = pref);
+    if (this.preferredURI === 'system') return (this.voice = null);
+    this.voice = this.frenchVoices[0] || null;
+    return this.voice;
+  }
+
+  setPreferred(uri) {
+    this.preferredURI = uri || '';
+    this.pick();
+  }
+
+  diagnose() {
+    return {
+      supported: this.supported,
+      total: this.voices.length,
+      french: this.frenchVoices.map((v) => `${v.name} (${v.lang}${v.localService ? ', locale' : ', en ligne'})`),
+      chosen: this.voice ? `${this.voice.name} (${this.voice.lang})` : 'moteur par défaut du téléphone',
+      failures: this.failures,
+      successes: this.successes,
+    };
   }
 
   say(text, { priority = 1, interrupt = false, key = null } = {}) {
@@ -90,8 +124,26 @@ export class Voice {
       this.onstate?.(false);
       setTimeout(() => this._next(), 80);
     };
+    let started = false;
+    u.onstart = () => {
+      started = true;
+      this.successes++;
+    };
     u.onend = done;
-    u.onerror = done;
+    u.onerror = (e) => {
+      if (e.error !== 'interrupted' && e.error !== 'canceled') {
+        this.failures++;
+        this.onerror?.(e.error || 'erreur', item.text);
+      }
+      done();
+    };
+    // Aucune voix n'a démarré au bout de 4 s : on le signale (moteur absent, voix non installée…)
+    setTimeout(() => {
+      if (!started && this._token === token && this.current === item) {
+        this.failures++;
+        this.onerror?.('no-start', item.text);
+      }
+    }, 4000);
     this.onstate?.(true);
     speechSynthesis.speak(u);
     // Filet de sécurité : Chrome Android oublie parfois l'événement de fin.
