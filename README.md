@@ -1,4 +1,4 @@
-# ORIANE v2 — prototype web
+# ORIANE v2.1 — prototype web
 
 Guidage piéton vocal et détection d'obstacles par la caméra, pour personnes aveugles et malvoyantes.
 Prototype d'étude : **ORIANE complète la canne blanche ou le chien guide, il ne les remplace pas.**
@@ -25,27 +25,29 @@ Le premier lancement de la détection télécharge le modèle de scène (≈ 15 
 
 Réglages → **Simulation de marche** (× 3 ou × 10) : le trajet est joué virtuellement depuis votre position.
 
-## Ce que détecte la v2
+## Priorisation des alertes (v2.1, questionnaire du 20/11/2026)
 
-| Famille | Exemples | Alerte |
+| Niveau | Effet | Types d'obstacles (profil aveugle) |
 |---|---|---|
-| Murs, barrières | mur, façade, barrière, rambarde | voix + bip |
-| Portes | portes à poignée, poussantes, battantes | voix + bip |
-| Vitres | portes automatiques et coulissantes vitrées, vitrines | voix + bip (« porte ou paroi vitrée ») |
-| Poteaux | poteau, pilier, lampadaire, panneau, feu | voix + bip |
-| Poubelles | poubelle, tonneau | voix + bip |
-| Mobilier | chaise, table, banc, plante, carton… | bip + vibration, voix seulement sous 1,5 m |
-| Escaliers | escalier, marche, escalator | voix + bip |
-| Personnes, véhicules | personne, voiture, vélo, moto, bus | voix + bip ; véhicule qui approche annoncé jusqu'à 10 m |
-| Bord de trottoir | limite trottoir / chaussée | voix |
-| Autre | tout ce qui n'est pas du sol sur le chemin | « obstacle » |
+| 1 · Danger permanent | voix + vibration longue dès l'entrée dans la zone, coupe tout | véhicule qui approche (jusqu'à 10 m), escalier, vitre / porte vitrée |
+| 2 · Bip + phrase | un bip, puis « Personne, 3 mètres, devant » (bip seul pendant un guidage) | personne |
+| 2 · Bip seul | un bip ; la phrase seulement en danger | poteau, poubelle, bord de trottoir, obstacle non reconnu |
+| 3 · Vibration | vibration courte ; la phrase seulement en danger | porte, mobilier, eau |
+| 3 · Danger seulement | rien, sauf sous 1,5 m | mur, véhicule à l'arrêt, végétation |
 
-Règles (cahier des charges § 4.2) :
-- Alerte seulement **dans le couloir de marche** (1,5 m de large, réglable) et **à moins de 4 m** (réglable de 2 à 6 m).
-- Une seule annonce à l'entrée dans la zone ; hystérésis de 0,6 m pour éviter les répétitions.
-- **Urgence sous 1,5 m** : « Stop, mur devant », vibration, priorité sur toute autre phrase.
-- Obstacle frôlé sur le côté (hors couloir, à moins de 2 m) : bip discret seulement.
-- Téléphone trop incliné ou image trop sombre : message d'avertissement.
+Règles communes :
+- Zone surveillée : **3 m** devant, couloir de **1,2 m** ; danger sous **1,5 m** : « Stop, poteau, devant », vibration longue.
+- **Un seul bip** à l'apparition ; bips continus seulement sous 2 m, pour l'obstacle le plus proche.
+- **Immobile : silence**, sauf danger. Annonce seulement si l'obstacle **se rapproche**.
+- 2 s minimum entre deux annonces, sans limite par minute ; obstacles apparus ensemble : « Plusieurs obstacles. » + le plus important.
+- Pas de répétition, sauf si l'obstacle devient dangereux.
+- **Intérieur** (détecté automatiquement) : murs signalés seulement droit devant, à moins de 2 m.
+- « **Dis Oriane, silence** » : seuls les dangers et le niveau 1 restent, jusqu'à « Dis Oriane, reprends ».
+- Vibrations : longue = danger, courte = information, triple = commande comprise.
+- Profil « malvoyant » disponible (moins d'alertes) ; chaque niveau est réglable dans Réglages → Priorités.
+
+Familles reconnues : murs et barrières, portes, vitres, poteaux et panneaux, poubelles, mobilier, escaliers,
+personnes, véhicules, végétation, eau, bord de trottoir, et tout autre obstacle sur le chemin.
 
 ## Commandes vocales
 
@@ -55,6 +57,7 @@ Règles (cahier des charges § 4.2) :
 | un lieu, une enseigne, une catégorie, une adresse | recherche, propositions numérotées, puis guidage |
 | « oui », « ok », « deux », « trois », « suivant » | choix parmi les propositions |
 | « active la détection » / « arrête la détection » | détection d'obstacles |
+| « silence » / « reprends » | coupe les alertes non urgentes / les rétablit |
 | « qu'y a-t-il devant moi » | décrit ce que voit la caméra |
 | « répète », « où suis-je », « combien reste-t-il » | guidage |
 | « arrête le guidage », « aide » | |
@@ -80,6 +83,12 @@ de 4 à 8 fois par seconde, pour limiter la latence.
 
 Mode testeur : couleurs des zones reconnues, couloir surveillé en jaune, obstacles suivis avec leur
 distance, bord de trottoir en pointillés violets. Journal exportable en CSV (Réglages → Journal).
+
+## Si la voix ne sort pas (constaté sur OnePlus)
+
+Réglages → Voix → **Tester la voix** affiche les voix françaises disponibles. Essayer une autre voix dans
+« Voix utilisée », vérifier le volume Multimédia, sinon : Paramètres Android → Paramètres supplémentaires →
+Langues et saisie → Synthèse vocale → moteur « Services vocaux Google », langue Français, voix française téléchargée.
 
 ## Limites connues
 

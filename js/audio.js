@@ -150,6 +150,17 @@ export class SpatialAudio {
     osc.stop(when + dur + 0.02);
   }
 
+  /** Bip unique spatialisé (apparition d'un obstacle). */
+  ping({ angle, distance }) {
+    if (!this.ctx || !this.enabled) return;
+    const s = { panner: this._makePanner(), o: { angle, distance, kind: 'object' } };
+    this._place(s);
+    const t = this.ctx.currentTime + 0.01;
+    this._beep(s, t);
+    this._beep(s, t + 0.12);
+    setTimeout(() => s.panner.disconnect(), 600);
+  }
+
   /** Signaux non spatialisés : écoute, virage, arrivée, recalcul, alerte. */
   chime(kind) {
     if (!this.ctx) return;

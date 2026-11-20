@@ -80,81 +80,6 @@ test('bord de trottoir à 2,5 m', () => {
   assert.ok(Math.abs(r.curb.distance - 2.5) < 0.3, `bordure ${r.curb.distance}`);
 });
 
-const ob = (family, label, distance, lateral = 0) => ({
-  family, label, distance, lateral, latMin: lateral - 0.1, latMax: lateral + 0.1, angle: Math.atan2(lateral, distance) * 180 / Math.PI,
-});
-
-test('alertes : rien au-delà de 4 m, une annonce à l’entrée, urgence sous 1,5 m', () => {
-  const am = new AlertManager({ alertRange: 4, corridorWidth: 1.5 });
-  const said = [];
-  let beeps = 0;
-  let t = 0;
-  for (let d = 6; d >= 1.2; d -= 0.2) {
-    t += 200;
-    const r = am.update([ob(F.POTEAU, 'poteau', d)], { t, curb: null, lum: 0.5 });
-    said.push(...r.speech.map((s) => s.text));
-    if (d > 4.05) assert.equal(r.beeps.length, 0, `pas de bip à ${d.toFixed(1)} m`);
-    beeps += r.beeps.length;
-  }
-  assert.ok(beeps > 5);
-  assert.equal(said.filter((s) => s.startsWith('Poteau devant')).length, 1, said.join(' | '));
-  assert.ok(said.includes('Stop, poteau devant.'), said.join(' | '));
-});
-
-test('alertes : hystérésis, pas de répétition autour de 4 m', () => {
-  const am = new AlertManager({ alertRange: 4, corridorWidth: 1.5 });
-  const said = [];
-  let t = 0;
-  for (const d of [3.9, 3.9, 4.3, 3.9, 4.4, 3.95, 4.2, 3.9]) {
-    t += 200;
-    said.push(...am.update([ob(F.MUR, 'mur', d)], { t, curb: null }).speech.map((s) => s.text));
-  }
-  assert.equal(said.length, 1, said.join(' | '));
-});
-
-test('alertes : hors couloir, aucune alerte', () => {
-  const am = new AlertManager({ alertRange: 4, corridorWidth: 1.5 });
-  let t = 0;
-  for (let i = 0; i < 5; i++) {
-    t += 200;
-    const r = am.update([ob(F.MUR, 'mur', 3, -2.5)], { t, curb: null });
-    assert.equal(r.beeps.length + r.speech.length, 0);
-  }
-});
-
-test('alertes : mobilier = vibration sans parole, voix sous 1,5 m', () => {
-  const am = new AlertManager({ alertRange: 4, corridorWidth: 1.5 });
-  const said = [];
-  let vib = 0;
-  let t = 0;
-  for (let d = 3.5; d >= 1.2; d -= 0.25) {
-    t += 200;
-    const r = am.update([ob(F.MOBILIER, 'chaise', d)], { t, curb: null });
-    said.push(...r.speech.map((s) => s.text));
-    if (r.vibrate) vib++;
-  }
-  assert.ok(vib >= 1);
-  assert.deepEqual(said, ['Stop, chaise devant.']);
-});
-
-test('alertes : véhicule qui approche à 9 m', () => {
-  const am = new AlertManager({ alertRange: 4, corridorWidth: 1.5, vehicleRange: 10 });
-  const said = [];
-  let t = 0;
-  for (let d = 10; d >= 7; d -= 0.5) {
-    t += 200;
-    said.push(...am.update([ob(F.VEHICULE, 'voiture', d, -1.5)], { t, curb: null }).speech.map((s) => s.text));
-  }
-  assert.ok(said.some((s) => s.startsWith('Attention, voiture qui approche')), said.join(' | '));
-});
-
-test('alertes : bord de trottoir annoncé une fois', () => {
-  const am = new AlertManager({ alertRange: 4, corridorWidth: 1.5 });
-  const said = [];
-  for (let t = 200; t < 2000; t += 200) said.push(...am.update([], { t, curb: { distance: 2.2 } }).speech.map((s) => s.text));
-  assert.deepEqual(said, ['Bord de trottoir, 2 mètres.']);
-});
-
 import { parseRequest, findPlaces } from '../js/places.js';
 import { extractWake } from '../js/wake.js';
 
@@ -207,4 +132,130 @@ test('mur qui barre toute la largeur : annoncé devant', () => {
   assert.equal(r.obstacles.length, 1);
   assert.equal(r.obstacles[0].lateral, 0);
   assert.equal(r.obstacles[0].angle, 0);
+});
+
+// ---------- Alertes v2.1 (réponses au questionnaire) ----------
+import { VIB } from '../js/alerts.js';
+
+const ob = (family, label, distance, lateral = 0) => ({
+  family, label, distance, lateral, latMin: lateral - 0.1, latMax: lateral + 0.1, angle: Math.atan2(lateral, distance) * 180 / Math.PI,
+});
+const S = () => ({ alertRange: 3, corridorWidth: 1.2, urgentDist: 1.5, vehicleRange: 10, minGap: 2 });
+/** Fait approcher un obstacle de d0 à d1 (pas de 0,1 m toutes les 150 ms). */
+function walk(am, make, d0, d1, ctx = {}) {
+  const res = { speech: [], pings: 0, beeps: 0, vib: [] };
+  let t = ctx.t0 || 0;
+  for (let d = d0; d >= d1 - 1e-9; d -= 0.1) {
+    t += 150;
+    const r = am.update([].concat(make(d)), { t, curb: null, moving: true, ...ctx });
+    res.speech.push(...r.speech.map((x) => x.text));
+    res.pings += r.pings.length;
+    res.beeps += r.beeps.length;
+    if (r.vibrate) res.vib.push(r.vibrate);
+  }
+  return res;
+}
+
+test('poteau (niveau son) : un bip à l’entrée, rien au-delà de 3 m, « Stop » sous 1,5 m', () => {
+  const am = new AlertManager(S());
+  const r = walk(am, (d) => ob(F.POTEAU, 'poteau', d), 5, 1.2);
+  assert.equal(r.pings, 1);
+  assert.deepEqual(r.speech, ['Stop, poteau, devant.']);
+  assert.ok(r.beeps > 0, 'bips continus sous 2 m');
+});
+
+test('personne (niveau voix) : phrase courte une seule fois', () => {
+  const am = new AlertManager(S());
+  const r = walk(am, (d) => ob(F.PERSONNE, 'personne', d), 4, 1.8);
+  assert.deepEqual(r.speech, ['Personne, 3 mètres, devant.']);
+});
+
+test('pendant un guidage, niveau voix = bip seul', () => {
+  const am = new AlertManager(S());
+  const r = walk(am, (d) => ob(F.PERSONNE, 'personne', d), 4, 1.8, { navActive: true });
+  assert.deepEqual(r.speech, []);
+  assert.equal(r.pings, 1);
+});
+
+test('vitre (niveau 1) : voix prioritaire et vibration longue dès l’entrée', () => {
+  const am = new AlertManager(S());
+  const r = walk(am, (d) => ob(F.VITRE, 'porte ou paroi vitrée', d), 4, 2.5);
+  assert.deepEqual(r.speech, ['Porte ou paroi vitrée, 3 mètres, devant.']);
+  assert.ok(r.vib.some((v) => v === VIB.danger));
+});
+
+test('mobilier et eau (niveau vibre) : vibration courte, voix seulement en danger', () => {
+  const am = new AlertManager(S());
+  const r = walk(am, (d) => ob(F.MOBILIER, 'chaise', d), 4, 1.2);
+  assert.deepEqual(r.speech, ['Stop, chaise, devant.']);
+  assert.ok(r.vib.some((v) => v === VIB.info));
+});
+
+test('mur (niveau danger) : silence jusqu’à 1,5 m', () => {
+  const am = new AlertManager(S());
+  const r = walk(am, (d) => ob(F.MUR, 'mur', d), 4, 1.6);
+  assert.equal(r.speech.length + r.pings + r.vib.length, 0);
+});
+
+test('intérieur : mur sur le côté ignoré, mur droit devant signalé à 2 m', () => {
+  let am = new AlertManager(S());
+  let r = walk(am, (d) => ({ ...ob(F.MUR, 'mur', d, 0.5), latMin: 0.4, latMax: 0.6 }), 3, 1.0, { indoor: true });
+  assert.equal(r.speech.length, 0, r.speech.join(' | '));
+  am = new AlertManager(S());
+  r = walk(am, (d) => ({ ...ob(F.MUR, 'mur', d), latMin: -1, latMax: 1 }), 3, 1.85, { indoor: true });
+  assert.deepEqual(r.speech, ['Stop, mur, devant.']);
+});
+
+test('immobile : silence sauf danger', () => {
+  const am = new AlertManager(S());
+  const r = walk(am, (d) => ob(F.PERSONNE, 'personne', d), 4, 1.3, { moving: false });
+  assert.deepEqual(r.speech, ['Stop, personne, devant.']);
+  assert.equal(r.pings + r.beeps, 0);
+});
+
+test('obstacle qui ne se rapproche pas : pas d’annonce', () => {
+  const am = new AlertManager(S());
+  const said = [];
+  for (let t = 150; t < 3000; t += 150) said.push(...am.update([ob(F.PERSONNE, 'personne', 2.5)], { t, curb: null, moving: true }).speech);
+  assert.equal(said.length, 0);
+});
+
+test('mode silence : seuls les dangers et le niveau 1 passent', () => {
+  const am = new AlertManager(S());
+  const r = walk(am, (d) => [ob(F.PERSONNE, 'personne', d, -0.3), ob(F.ESCALIER, 'escalier', d + 0.3, 0.3)], 4, 1.2, { muted: true });
+  assert.ok(r.speech.includes('Escalier, 3 mètres, devant.'), r.speech.join(' | '));
+  assert.ok(!r.speech.some((x) => x.startsWith('Personne,')), r.speech.join(' | '));
+  assert.ok(r.speech.some((x) => x.startsWith('Stop, personne')), r.speech.join(' | '));
+});
+
+test('plusieurs obstacles : regroupés, le plus important énoncé', () => {
+  const am = new AlertManager(S());
+  const r = walk(am, (d) => [ob(F.POUBELLE, 'poubelle', d, 0.3), ob(F.PERSONNE, 'personne', d + 0.05, -0.3)], 4, 2.2);
+  assert.deepEqual(r.speech, ['Plusieurs obstacles. Personne, 3 mètres, devant.']);
+});
+
+test('véhicule qui approche à 9 m (niveau 1)', () => {
+  const am = new AlertManager(S());
+  const said = [];
+  let t = 0;
+  for (let d = 10; d >= 7; d -= 0.5) {
+    t += 200;
+    said.push(...am.update([ob(F.VEHICULE, 'voiture', d, -1.5)], { t, curb: null, moving: true }).speech.map((x) => x.text));
+  }
+  assert.ok(said.some((x) => x.startsWith('Attention, voiture qui approche')), said.join(' | '));
+});
+
+test('bord de trottoir (niveau son) : un bip, puis « Stop » sous 1,5 m', () => {
+  const am = new AlertManager(S());
+  const said = [];
+  let pings = 0;
+  let t = 0;
+  for (let d = 3; d >= 1.2; d -= 0.2) {
+    t += 200;
+    const r = am.update([], { t, curb: { distance: d }, moving: true });
+    said.push(...r.speech.map((x) => x.text));
+    pings += r.pings.length;
+  }
+  assert.equal(pings, 1);
+  assert.deepEqual(said, ['Stop, bord de trottoir.']);
 });

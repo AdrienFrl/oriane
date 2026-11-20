@@ -9,12 +9,12 @@ import { Navigator } from './nav.js';
 import { SimWalker } from './sim.js';
 import { Vision } from './vision.js';
 import { Perception } from './perception.js';
-import { AlertManager, dirWords } from './alerts.js';
+import { AlertManager, dirWords, PRESETS, LEVEL_KEYS, LEVEL_LABELS, VIB } from './alerts.js';
 import { WakeWord } from './wake.js';
 import { store, haversine, fmtDist, norm, angleDiff } from './util.js';
 
 const $ = (s) => document.querySelector(s);
-const VERSION = '2.0';
+const VERSION = '2.1';
 
 const DEFAULTS = {
   orsKey: '',
@@ -23,9 +23,13 @@ const DEFAULTS = {
   voiceRate: 1.05,
   voiceURI: '',
   wakeWord: false,
-  alertRange: 4,
-  corridorWidth: 1.5,
+  alertRange: 3,
+  corridorWidth: 1.2,
+  urgentDist: 1.5,
+  minGap: 2,
   vehicleRange: 10,
+  profile: 'aveugle',
+  levels: { ...PRESETS.aveugle },
   beeps: true,
   vibrations: true,
   hrtf: true,
@@ -42,6 +46,12 @@ const DEFAULTS = {
   modelBase: 'lite_mobilenet_v2',
 };
 const settings = { ...DEFAULTS, ...store.get('settings', {}) };
+// v2.1 : réglages issus du questionnaire de priorisation (remplacent ceux de la v2)
+if ((settings.settingsVersion || 0) < 21) {
+  Object.assign(settings, { alertRange: 3, corridorWidth: 1.2, urgentDist: 1.5, minGap: 2, vehicleRange: 10, profile: 'aveugle', levels: { ...PRESETS.aveugle }, settingsVersion: 21 });
+  store.set('settings', settings);
+}
+settings.levels = { ...PRESETS.aveugle, ...(settings.levels || {}) };
 settings.announceRange = settings.alertRange; // utilisé par le détecteur de secours
 
 const state = {
@@ -129,7 +139,7 @@ const wake = new WakeWord({
   log,
   onWake: (rest) => {
     audio.chime('listen');
-    vibrate([60]);
+    vibrate(VIB.confirm);
     if (rest && rest.length > 1) handleUtterance(rest);
     else doListen(false);
   },
@@ -160,6 +170,20 @@ function onOrient(e) {
 }
 window.addEventListener('deviceorientationabsolute', onOrient);
 window.addEventListener('deviceorientation', onOrient);
+// Marche ou immobile : secousses de l'accéléromètre (pas) ou vitesse GPS
+const motion = { supported: false, lastStep: 0 };
+window.addEventListener('devicemotion', (e) => {
+  const a = e.accelerationIncludingGravity;
+  if (!a || a.x == null) return;
+  motion.supported = true;
+  if (Math.abs(Math.hypot(a.x, a.y, a.z) - 9.81) > 1.2) motion.lastStep = Date.now();
+});
+function isMoving() {
+  const p = state.lastPos;
+  if (p && p.speed != null && p.speed > 0.6 && Date.now() - p.t < 3000) return true;
+  if (!motion.supported) return true;
+  return Date.now() - motion.lastStep < 1500;
+}
 /** Inclinaison de la caméra vers le bas, en degrés (téléphone tenu verticalement). */
 const getPitch = () => (beta == null ? null : Math.max(-20, Math.min(80, 90 - beta)));
 
@@ -412,6 +436,7 @@ async function doListen(withChime = true) {
     return;
   }
   log('🎙 Entendu : ' + alts[0]);
+  vibrate(VIB.confirm);
   handleUtterance(alts[0]);
 }
 
@@ -442,6 +467,8 @@ function handleUtterance(text) {
   }
 
   if (words <= 8) {
+    if (/^(silence|tais[- ]toi|chut|mode silencieux|moins de bruit)\b/.test(t)) return setMuted(true);
+    if (/^(reprends|reprend|reprise|reprendre|fin du silence|parle a nouveau)\b/.test(t)) return setMuted(false);
     if (/(repete|redis|repeter)/.test(t)) return nav.repeat();
     if (/(ou suis[- ]je|ou je suis|ou est[- ]ce que je suis|ma position)/.test(t)) return whereAmI();
     if (/(combien|reste[- ]t[- ]il|il reste|distance restante)/.test(t)) return say(nav.remainingText(), { priority: 2 });
@@ -475,15 +502,15 @@ function help() {
   say(
     'Dites « Dis Oriane », ou appuyez sur Parler, puis une destination : un magasin, un lieu ou une adresse, ' +
       'par exemple Intermarché à Montauban, ou la pharmacie la plus proche. ' +
-      'Vous pouvez aussi dire : active la détection, qu’y a-t-il devant moi, répète, où suis-je, distance restante, ' +
-      'arrête la détection, ou arrête le guidage.',
+      'Vous pouvez aussi dire : active la détection, qu’y a-t-il devant moi, silence, reprends, répète, où suis-je, ' +
+      'distance restante, arrête la détection, ou arrête le guidage.',
     { priority: 2, interrupt: true }
   );
 }
 
 // ---------------- Détection d'obstacles (indépendante du guidage) ----------------
 
-const det = { running: false, mode: null, stream: null, tiltSince: null, lastTiltWarn: -Infinity };
+const det = { running: false, mode: null, stream: null, tiltSince: null, lastTiltWarn: -Infinity, indoor: false, indoorScore: 0, muted: false };
 const alerts = new AlertManager(settings);
 
 const perception = new Perception({
@@ -514,13 +541,41 @@ function onPerception(msg) {
   const k = settings.calib;
   const obs = msg.obstacles.map((o) => ({ ...o, distance: o.distance * k, lateral: o.lateral * k, latMin: o.latMin * k, latMax: o.latMax * k }));
   const curb = msg.curb ? { distance: msg.curb.distance * k } : null;
-  const r = alerts.update(obs, { t: Date.now(), curb, lum: msg.lum });
+  updateIndoor(msg.labels);
+  const r = alerts.update(obs, {
+    t: Date.now(), curb, lum: msg.lum, moving: isMoving(), indoor: det.indoor, navActive: nav.active, muted: det.muted,
+  });
   audio.update(settings.beeps ? r.beeps : []);
+  if (settings.beeps) for (const p of r.pings) audio.ping(p);
   for (const s of r.speech) say(s.text, { priority: s.priority, key: s.key });
   if (r.vibrate) vibrate(r.vibrate);
   if (settings.showVideo) perception.drawOverlay(r.tracks, curb);
   renderObstacles(r.tracks.filter((tr) => tr.misses === 0));
   checkTilt();
+}
+
+// Intérieur / extérieur, d'après la scène (plafond et sol intérieur contre ciel, route, trottoir)
+const INDOOR = new Set([3, 5, 28]); // floor, ceiling, rug
+const OUTDOOR = new Set([2, 4, 6, 9, 11, 13]); // sky, tree, road, grass, sidewalk, earth
+function updateIndoor(labels) {
+  let inn = 0;
+  let out = 0;
+  for (let i = 0; i < labels.length; i += 3) {
+    if (INDOOR.has(labels[i])) inn++;
+    else if (OUTDOOR.has(labels[i])) out++;
+  }
+  if (inn + out < 20) return;
+  det.indoorScore = det.indoorScore * 0.9 + (inn > out ? 0.1 : 0);
+  const was = det.indoor;
+  det.indoor = det.indoor ? det.indoorScore > 0.35 : det.indoorScore > 0.65;
+  if (was !== det.indoor) log(det.indoor ? 'Mode intérieur (murs signalés seulement droit devant).' : 'Mode extérieur.');
+}
+
+function setMuted(on) {
+  det.muted = on;
+  vibrate(VIB.confirm);
+  $('#muteState').hidden = !on;
+  say(on ? 'Silence. Je préviens seulement des dangers. Pour reprendre, dites : Dis Oriane, reprends.' : 'Alertes reprises.', { priority: 2, interrupt: true });
 }
 
 function checkTilt() {
@@ -657,6 +712,9 @@ setInterval(() => {
   }
   const p = getPitch();
   if (p != null) parts.push(`inclinaison ${Math.round(p)}°`);
+  parts.push(isMoving() ? 'en marche' : 'immobile (silence sauf danger)');
+  if (det.mode === 'scene') parts.push(det.indoor ? 'intérieur' : 'extérieur');
+  if (det.muted) parts.push('SILENCE');
   $('#visionStatus').textContent = parts.join(' · ');
 }, 1000);
 
@@ -723,6 +781,40 @@ function setWake(on) {
     releaseWakeLockIfIdle();
   }
 }
+
+function renderLevels() {
+  const box = $('#levelsBox');
+  box.innerHTML = '';
+  for (const [key, name] of Object.entries(LEVEL_KEYS)) {
+    const row = document.createElement('div');
+    row.className = 'lvlrow';
+    const lab = document.createElement('label');
+    lab.htmlFor = 'lvl-' + key;
+    lab.textContent = name;
+    const sel = document.createElement('select');
+    sel.id = 'lvl-' + key;
+    for (const [v, l] of Object.entries(LEVEL_LABELS)) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = l;
+      sel.appendChild(o);
+    }
+    sel.value = settings.levels[key];
+    sel.addEventListener('change', () => {
+      settings.levels = { ...settings.levels, [key]: sel.value };
+      store.set('settings', settings);
+    });
+    row.append(lab, sel);
+    box.appendChild(row);
+  }
+}
+$('#profileSel').addEventListener('change', (e) => {
+  settings.profile = e.target.value;
+  settings.levels = { ...PRESETS[settings.profile] };
+  store.set('settings', settings);
+  renderLevels();
+  say(settings.profile === 'aveugle' ? 'Profil aveugle appliqué.' : 'Profil malvoyant appliqué.', { priority: 2 });
+});
 
 function bindSettings() {
   for (const el of document.querySelectorAll('[data-setting]')) {
@@ -823,6 +915,8 @@ $('#btnExportLog').addEventListener('click', () => {
   }, 1000);
 });
 
+$('#profileSel').value = settings.profile;
+renderLevels();
 bindSettings();
 fillVoices();
 setStatus('Prêt');
@@ -835,4 +929,4 @@ if (settings.wakeWord) {
 }
 
 // Accès pour les tests automatisés
-window.__oriane = { handleUtterance, state, settings, alerts, nav };
+window.__oriane = { handleUtterance, state, settings, alerts, nav, det };

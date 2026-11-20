@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0b1020" />
   <meta name="description" content="ORIANE — guidage piéton vocal et détection d'obstacles pour personnes aveugles et malvoyantes (prototype v2)." />
-  <title>ORIANE v2 — prototype</title>
+  <title>ORIANE v2.1 — prototype</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="css/style.css?v=2" />
+  <link rel="stylesheet" href="css/style.css?v=21" />
 </head>
 <body>
   <header>
-    <div class="brand" aria-label="Oriane, version 2">ORIANE <span class="ver">v2</span></div>
+    <div class="brand" aria-label="Oriane, version 2.1">ORIANE <span class="ver">v2.1</span></div>
     <p id="status" role="status" aria-live="polite">Chargement…</p>
   </header>
 
@@ -27,7 +27,7 @@
     <section aria-labelledby="h-dest">
       <h2 id="h-dest" class="sr-only">Destination et commandes</h2>
       <button id="btnTalk" class="big primary" aria-describedby="talkHint">Parler</button>
-      <p id="talkHint" class="hint">Dites un lieu (« Intermarché à Montauban », « la pharmacie la plus proche », « 18 rue de Metz à Toulouse ») ou une commande (« active la détection », « qu'y a-t-il devant moi », « répète »).</p>
+      <p id="talkHint" class="hint">Dites un lieu (« Intermarché à Montauban », « la pharmacie la plus proche », « 18 rue de Metz à Toulouse ») ou une commande (« active la détection », « qu'y a-t-il devant moi », « silence », « reprends »).</p>
 
       <label class="check wake"><input type="checkbox" data-setting="wakeWord" /> Mains libres : « Dis Oriane »</label>
       <p id="wakeHint" class="hint">Activez pour lancer ORIANE à la voix, sans toucher l'écran.</p>
@@ -61,6 +61,7 @@
         <button id="btnDescribe">Qu'y a-t-il devant ?</button>
       </div>
       <p id="visionStatus" class="muted small">Caméra inactive</p>
+      <p id="muteState" class="mutebox" hidden>Silence : seuls les dangers sont signalés. Dites « Dis Oriane, reprends ».</p>
       <div id="camWrap" hidden>
         <video id="video" playsinline muted></video>
         <canvas id="mask" aria-hidden="true"></canvas>
@@ -93,13 +94,29 @@
       <summary>Réglages</summary>
 
       <fieldset>
+        <legend>Priorités des alertes</legend>
+        <label for="profileSel">Profil</label>
+        <select id="profileSel">
+          <option value="aveugle">Personne aveugle (réponses du questionnaire)</option>
+          <option value="malvoyant">Personne malvoyante (moins d'alertes)</option>
+        </select>
+        <p class="hint">Niveau d'alerte de chaque type d'obstacle. Le danger (sous la distance de danger) est toujours signalé, sauf au niveau 4.</p>
+        <div id="levelsBox" class="levels"></div>
+      </fieldset>
+
+      <fieldset>
         <legend>Alertes d'obstacles</legend>
         <label for="alertRange">Distance d'alerte : <output data-out="alertRange"></output> m</label>
         <input id="alertRange" type="range" min="2" max="6" step="0.5" data-setting="alertRange" />
+        <label for="urgentDist">Distance de danger : <output data-out="urgentDist"></output> m</label>
+        <input id="urgentDist" type="range" min="1" max="2" step="0.5" data-setting="urgentDist" />
         <label for="corridorWidth">Largeur du couloir surveillé : <output data-out="corridorWidth"></output> m</label>
         <input id="corridorWidth" type="range" min="1" max="2" step="0.1" data-setting="corridorWidth" />
+        <label for="minGap">Temps minimal entre deux annonces : <output data-out="minGap"></output> s</label>
+        <input id="minGap" type="range" min="1" max="6" step="1" data-setting="minGap" />
+        <p class="hint">Silence quand vous êtes immobile ; annonce seulement si l'obstacle se rapproche ; un bip à l'apparition, bips continus sous 2 m pour l'obstacle le plus proche.</p>
         <label class="check"><input type="checkbox" data-setting="beeps" /> Bips spatialisés</label>
-        <label class="check"><input type="checkbox" data-setting="vibrations" /> Vibrations (mobilier, urgence)</label>
+        <label class="check"><input type="checkbox" data-setting="vibrations" /> Vibrations (longue = danger, courte = information, triple = commande comprise)</label>
         <label class="check"><input type="checkbox" data-setting="hrtf" /> Son 3D (HRTF) — sinon stéréo simple</label>
         <p class="hint">Utilisez des écouteurs stéréo, idéalement ouverts ou à conduction osseuse.</p>
         <button id="btnTestSound" type="button">Tester les sons</button>
@@ -175,6 +192,6 @@
       Données cartographiques © contributeurs <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>.</p>
   </main>
 
-  <script type="module" src="js/app.js?v=2"></script>
+  <script type="module" src="js/app.js?v=21"></script>
 </body>
 </html>
