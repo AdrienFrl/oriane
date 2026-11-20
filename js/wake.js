@@ -18,6 +18,27 @@ export class WakeWord {
     this.blockers = new Set();
     this.rec = null;
     this.timer = null;
+    this.endWaiters = [];
+  }
+
+  /**
+   * Promesse résolue quand l'écoute est vraiment arrêtée (micro libéré), au plus tard après maxMs.
+   * Sur Android, parler pendant que le micro est encore ouvert peut rendre la voix muette.
+   */
+  release(maxMs = 400) {
+    if (!this.rec) return Promise.resolve();
+    try {
+      this.rec.abort();
+    } catch {
+      /* déjà arrêtée */
+    }
+    return new Promise((resolve) => {
+      const t = setTimeout(resolve, maxMs);
+      this.endWaiters.push(() => {
+        clearTimeout(t);
+        resolve();
+      });
+    });
   }
 
   static get supported() {
@@ -94,7 +115,11 @@ export class WakeWord {
       }
     };
     r.onend = () => {
-      if (this.rec === r) this.rec = null;
+      if (this.rec === r) {
+        this.rec = null;
+        const w = this.endWaiters.splice(0);
+        for (const f of w) f();
+      }
       this._soon();
     };
     try {

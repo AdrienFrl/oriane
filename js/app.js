@@ -1,5 +1,7 @@
 // ORIANE v2 — application : interface, commandes vocales, détection d'obstacles et guidage.
 // La détection d'obstacles est indépendante du guidage : elle marche avec ou sans destination.
+// v2.2-0 : capteurs et traitement des analyses en modules purs (sensors.js, pipeline.js), partagés avec
+// le rejeu ; journal détaillé des alertes, compteur par minute (bêta), enregistrement et rejeu d'une marche.
 
 import { Voice, listen, hasRecognition } from './speech.js';
 import { SpatialAudio } from './audio.js';
@@ -11,10 +13,15 @@ import { Vision } from './vision.js';
 import { Perception } from './perception.js';
 import { AlertManager, dirWords, PRESETS, LEVEL_KEYS, LEVEL_LABELS, VIB } from './alerts.js';
 import { WakeWord } from './wake.js';
-import { store, haversine, fmtDist, norm, angleDiff } from './util.js';
+import { store, fmtDist, norm, angleDiff } from './util.js';
+import { TiltFilter, MotionState } from './sensors.js';
+import { IndoorDetector, processFrame } from './pipeline.js';
+import { AlertCounter, formatEvent, eventsToCsv, counterStatus, summaryText, fmtDuration } from './instruments.js';
+import { Recorder, parseRecording, ReplaySession, fromBase64 } from './rejeu.js';
+import { FAMILY_COLORS, CLASS_FAMILY } from './classes.js';
 
 const $ = (s) => document.querySelector(s);
-const VERSION = '2.1';
+const VERSION = '2.2-0';
 
 const DEFAULTS = {
   orsKey: '',
@@ -41,6 +48,11 @@ const DEFAULTS = {
   camHeight: 1.3,
   fov: 66,
   calib: 1,
+  // outils de test (v2.2-0)
+  alertCounter: true, // H1 : compteur d'alertes par minute (bêta, actif par défaut)
+  logDetail: false, // journal : noter aussi les alertes retenues
+  recording: false, // H3 : enregistrement et rejeu de marches (activable)
+  recImages: true, // garder l'image 224 px de chaque analyse dans l'enregistrement
   // secours COCO-SSD (v1)
   objSpeech: 'important',
   modelBase: 'lite_mobilenet_v2',
@@ -82,6 +94,31 @@ function log(msg) {
 }
 const setStatus = (t) => ($('#status').textContent = t);
 
+// Journal détaillé des alertes (lot 2.2-0) : toutes les décisions, exportables en CSV
+const alertEvents = [];
+const wallTime = (t) => new Date(performance.timeOrigin + t).toISOString();
+function logEvents(events, prefix = '') {
+  for (const e of events) {
+    if (!e.emitted && !settings.logDetail) continue;
+    log(prefix + formatEvent(e));
+  }
+}
+function downloadText(text, name, type = 'text/csv;charset=utf-8') {
+  downloadBlob(new Blob([text], { type }), name);
+}
+function downloadBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 1000);
+}
+const stamp = () => new Date().toISOString().slice(0, 16).replace(':', 'h').replace('T', '-');
+
 // ---------------- Voix, sons, vibrations ----------------
 
 const voice = new Voice();
@@ -89,8 +126,11 @@ const audio = new SpatialAudio();
 voice.onsay = (t) => log('🔊 ' + t);
 voice.setPreferred(settings.voiceURI);
 let voiceWarned = false;
+voice.onrecover = (code, text) => {
+  log(`🔁 Voix bloquée (${code}), moteur relancé pour : « ${text.slice(0, 60)} » [${voice.engineState()}]`);
+};
 voice.onerror = (code, text) => {
-  log(`⚠️ Voix muette (${code}) pour : « ${text.slice(0, 60)} »`);
+  log(`⚠️ Voix muette (${code}) pour : « ${text.slice(0, 60)} » [${voice.engineState()}, voix ${voice.voice?.name || 'par défaut'}, mains libres ${wake.active ? 'oui' : 'non'}]`);
   const box = $('#voiceWarn');
   box.hidden = false;
   if (!voiceWarned) {
@@ -119,7 +159,7 @@ function renderVoiceDiag() {
   $('#voiceDiag').textContent = !d.supported
     ? 'Synthèse vocale absente de ce navigateur.'
     : `${d.total} voix sur le téléphone, dont ${d.french.length} en français. Voix utilisée : ${d.chosen}.` +
-      (d.failures ? ` Échecs : ${d.failures}.` : '');
+      (d.failures ? ` Échecs : ${d.failures}.` : '') + (d.recoveries ? ` Moteur relancé : ${d.recoveries} fois.` : '');
 }
 voice.onvoices = fillVoices;
 const say = (t, o) => voice.say(t, o);
@@ -153,12 +193,21 @@ voice.onstate = (speaking) => {
   if (speaking) wake.block('tts');
   else wake.unblock('tts');
 };
+// Mains libres : la voix attend que le micro soit libéré (400 ms au plus).
+voice.beforeSpeak = () => wake.release(400);
+// Retour sur la page : Chrome peut avoir mis la voix en pause en arrière-plan.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && voice.supported && speechSynthesis.paused) speechSynthesis.resume();
+});
 
 // ---------------- Orientation du téléphone ----------------
 
 let compass = null;
-let beta = null;
+const tilt = new TiltFilter();
+const motion = new MotionState();
+let recorder = null; // enregistrement d'une marche en cours
 function onOrient(e) {
+  recorder?.orientation(performance.now(), e);
   let h = null;
   if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading;
   else if (e.absolute && e.alpha != null) h = (360 - e.alpha) % 360;
@@ -166,26 +215,27 @@ function onOrient(e) {
     h = (h + (screen.orientation?.angle || 0)) % 360;
     compass = compass == null ? h : (compass + angleDiff(compass, h) * 0.3 + 360) % 360;
   }
-  if (e.beta != null) beta = beta == null ? e.beta : beta * 0.7 + e.beta * 0.3; // lissage ≈ 300 ms
+  tilt.onOrientation(e.beta); // lissage v2.1, inchangé (remplacé au lot 2.2-1)
 }
 window.addEventListener('deviceorientationabsolute', onOrient);
 window.addEventListener('deviceorientation', onOrient);
 // Marche ou immobile : secousses de l'accéléromètre (pas) ou vitesse GPS
-const motion = { supported: false, lastStep: 0 };
 window.addEventListener('devicemotion', (e) => {
   const a = e.accelerationIncludingGravity;
   if (!a || a.x == null) return;
-  motion.supported = true;
-  if (Math.abs(Math.hypot(a.x, a.y, a.z) - 9.81) > 1.2) motion.lastStep = Date.now();
+  const t = performance.now();
+  recorder?.motion(t, e);
+  motion.onMotion(t, a.x, a.y, a.z);
 });
-function isMoving() {
-  const p = state.lastPos;
-  if (p && p.speed != null && p.speed > 0.6 && Date.now() - p.t < 3000) return true;
-  if (!motion.supported) return true;
-  return Date.now() - motion.lastStep < 1500;
-}
+const isMoving = () => motion.isMoving(performance.now());
 /** Inclinaison de la caméra vers le bas, en degrés (téléphone tenu verticalement). */
-const getPitch = () => (beta == null ? null : Math.max(-20, Math.min(80, 90 - beta)));
+const getPitch = () => tilt.pitch();
+/** Toute position reçue (GPS ou simulée) : vitesse pour « en marche », et enregistrement. */
+function feedPosition(pos) {
+  const t = performance.now();
+  motion.onGps(t, pos.speed);
+  recorder?.gps(t, pos);
+}
 
 // ---------------- Guidage ----------------
 
@@ -218,6 +268,7 @@ function getPositionOnce() {
     navigator.geolocation.getCurrentPosition(
       (p) => {
         state.lastPos = fromCoords(p);
+        feedPosition(state.lastPos);
         res(state.lastPos);
       },
       (e) => rej(new Error(geoErr(e))),
@@ -232,6 +283,7 @@ function onPosition(pos) {
     pos.heading = gpsOk ? pos.heading : compass;
   }
   state.lastPos = pos;
+  feedPosition(pos);
   $('#navGps').textContent = pos.simulated
     ? 'Position simulée'
     : `GPS ± ${Math.round(pos.accuracy)} m${compass != null ? ' · boussole active' : ''}`;
@@ -473,6 +525,8 @@ function handleUtterance(text) {
     if (/(ou suis[- ]je|ou je suis|ou est[- ]ce que je suis|ma position)/.test(t)) return whereAmI();
     if (/(combien|reste[- ]t[- ]il|il reste|distance restante)/.test(t)) return say(nav.remainingText(), { priority: 2 });
     if (/(devant moi|qu'est[- ]ce qu'il y a|qu'y a[- ]t[- ]il|decris|autour de moi)/.test(t)) return describe();
+    if (/(lance|demarre|commence|active).*enregistrement/.test(t)) return startRecording();
+    if (/(arrete|stop|termine|coupe).*enregistrement/.test(t)) return stopRecording();
     if (/(coupe|desactive|arrete|eteins|stop).*(detection|obstacle|camera)/.test(t)) return stopDetection();
     if (/(active|lance|demarre|allume|commence|mets?).*(detection|obstacle|camera)/.test(t) || /^(?:la )?detection(?: d'obstacles?)?$/.test(t)) return startDetection();
     if (/(arrete|stop|termine|annule).*(guidage|navigation|itineraire)/.test(t) || (t === 'stop' && nav.active)) return stopGuidance();
@@ -510,8 +564,11 @@ function help() {
 
 // ---------------- Détection d'obstacles (indépendante du guidage) ----------------
 
-const det = { running: false, mode: null, stream: null, tiltSince: null, lastTiltWarn: -Infinity, indoor: false, indoorScore: 0, muted: false };
+const det = { running: false, mode: null, stream: null, tiltSince: null, lastTiltWarn: -Infinity, indoor: false, muted: false };
 const alerts = new AlertManager(settings);
+const counter = new AlertCounter();
+/** Environnement du traitement des analyses, le même qu'au rejeu (pipeline.js). */
+const env = { settings, alerts, indoor: new IndoorDetector(), counter };
 
 const perception = new Perception({
   video: $('#video'),
@@ -538,37 +595,32 @@ const vision = new Vision({
 });
 
 function onPerception(msg) {
-  const k = settings.calib;
-  const obs = msg.obstacles.map((o) => ({ ...o, distance: o.distance * k, lateral: o.lateral * k, latMin: o.latMin * k, latMax: o.latMax * k }));
-  const curb = msg.curb ? { distance: msg.curb.distance * k } : null;
-  updateIndoor(msg.labels);
-  const r = alerts.update(obs, {
-    t: Date.now(), curb, lum: msg.lum, moving: isMoving(), indoor: det.indoor, navActive: nav.active, muted: det.muted,
-  });
+  if (replay.session) return; // pas de détection réelle pendant un rejeu
+  const t = performance.now();
+  const ctx = { t, moving: isMoving(), navActive: nav.active, muted: det.muted };
+  const p = processFrame(env, msg, ctx);
+  det.indoor = env.indoor.indoor;
+  if (p.indoorChanged) log(det.indoor ? 'Mode intérieur (murs signalés seulement droit devant).' : 'Mode extérieur.');
+  for (const e of p.r.events) alertEvents.push({ ...e, wall: wallTime(e.t) });
+  if (alertEvents.length > 5000) alertEvents.splice(0, alertEvents.length - 5000);
+  logEvents(p.r.events);
+  if (recorder) {
+    recorder.frame(msg, t, ctx);
+    recorder.live(p.r.events);
+    if (recorder.full) stopRecording('durée maximale atteinte');
+  }
+  emitOutputs(p.r);
+  if (settings.showVideo) perception.drawOverlay(p.r.tracks, p.curb);
+  checkTilt();
+}
+
+/** Sons, voix et vibrations d'une analyse (direct ou rejeu en temps réel). */
+function emitOutputs(r) {
   audio.update(settings.beeps ? r.beeps : []);
   if (settings.beeps) for (const p of r.pings) audio.ping(p);
   for (const s of r.speech) say(s.text, { priority: s.priority, key: s.key });
   if (r.vibrate) vibrate(r.vibrate);
-  if (settings.showVideo) perception.drawOverlay(r.tracks, curb);
   renderObstacles(r.tracks.filter((tr) => tr.misses === 0));
-  checkTilt();
-}
-
-// Intérieur / extérieur, d'après la scène (plafond et sol intérieur contre ciel, route, trottoir)
-const INDOOR = new Set([3, 5, 28]); // floor, ceiling, rug
-const OUTDOOR = new Set([2, 4, 6, 9, 11, 13]); // sky, tree, road, grass, sidewalk, earth
-function updateIndoor(labels) {
-  let inn = 0;
-  let out = 0;
-  for (let i = 0; i < labels.length; i += 3) {
-    if (INDOOR.has(labels[i])) inn++;
-    else if (OUTDOOR.has(labels[i])) out++;
-  }
-  if (inn + out < 20) return;
-  det.indoorScore = det.indoorScore * 0.9 + (inn > out ? 0.1 : 0);
-  const was = det.indoor;
-  det.indoor = det.indoor ? det.indoorScore > 0.35 : det.indoorScore > 0.65;
-  if (was !== det.indoor) log(det.indoor ? 'Mode intérieur (murs signalés seulement droit devant).' : 'Mode extérieur.');
 }
 
 function setMuted(on) {
@@ -651,6 +703,7 @@ async function startDetection() {
   }
   det.running = true;
   alerts.reset();
+  counter.reset();
   say('Chargement de la détection.', { priority: 2 });
   det.mode = settings.engine === 'coco' ? 'coco' : 'scene';
   if (det.mode === 'scene') {
@@ -685,6 +738,7 @@ async function startDetection() {
 function stopDetection(speak = true) {
   if (!det.running && !det.stream) return;
   det.running = false;
+  if (recorder) stopRecording('détection coupée');
   perception.stop();
   if (vision.running) vision.stop();
   closeCamera();
@@ -701,6 +755,11 @@ function stopDetection(speak = true) {
 }
 
 setInterval(() => {
+  if (replay.session) {
+    $('#visionStatus').textContent = `Rejeu · ${replay.session.fi} / ${replay.session.frames.length} analyses` +
+      (settings.alertCounter ? ' · ' + counterStatus(replay.session.counter, replay.session.counter.lastT ?? 0) : '');
+    return;
+  }
   if (!det.running) return;
   const parts = [];
   if (det.mode === 'scene') {
@@ -715,8 +774,167 @@ setInterval(() => {
   parts.push(isMoving() ? 'en marche' : 'immobile (silence sauf danger)');
   if (det.mode === 'scene') parts.push(det.indoor ? 'intérieur' : 'extérieur');
   if (det.muted) parts.push('SILENCE');
+  if (settings.alertCounter) parts.push(counterStatus(counter, performance.now()));
+  if (recorder) parts.push(`● ENREGISTREMENT ${fmtDuration(recorder.durationMs)}`);
   $('#visionStatus').textContent = parts.join(' · ');
+  if (recorder) $('#recState').textContent = `Enregistrement en cours : ${fmtDuration(recorder.durationMs)}, ${recorder.frameCount} analyses.`;
 }, 1000);
+
+// ---------------- Enregistrement d'une marche (H3, FON-40) ----------------
+// Images 224 px, cartes de segmentation et capteurs, dans un fichier téléchargé sur le téléphone.
+// Rien n'est envoyé à un serveur.
+
+async function startRecording() {
+  if (!settings.recording) return say('Activez d’abord l’enregistrement dans Outils de test.', { priority: 2 });
+  if (recorder) return say('L’enregistrement est déjà en cours.', { priority: 2 });
+  if (replay.session) stopReplay();
+  if (!det.running) await startDetection();
+  if (!det.running || det.mode !== 'scene') {
+    say('L’enregistrement demande la détection de scène complète.', { priority: 2 });
+    return;
+  }
+  recorder = new Recorder({
+    now: performance.now(), appVersion: VERSION, settings, images: settings.recImages, device: navigator.userAgent,
+  });
+  perception.record = settings.recImages;
+  vibrate(VIB.confirm);
+  $('#btnRec').textContent = 'Arrêter et enregistrer le fichier';
+  $('#btnRec').setAttribute('aria-pressed', 'true');
+  log('● Enregistrement démarré.');
+  say('Enregistrement démarré.', { priority: 2 });
+}
+
+async function stopRecording(why = '') {
+  const rec = recorder;
+  if (!rec) return;
+  recorder = null;
+  perception.record = false;
+  $('#btnRec').textContent = 'Enregistrer une marche';
+  $('#btnRec').setAttribute('aria-pressed', 'false');
+  const blob = await rec.toBlob();
+  const name = `oriane-rejeu-${stamp()}.json.gz`;
+  downloadBlob(blob, name);
+  const text = `Enregistrement terminé${why ? ' (' + why + ')' : ''} : ${fmtDuration(rec.durationMs)}, ${rec.frameCount} analyses, ${blob.size < 1e6 ? Math.ceil(blob.size / 1e3) + ' Ko' : (blob.size / 1e6).toFixed(1).replace('.', ',') + ' Mo'}. Fichier ${name}.`;
+  $('#recState').textContent = text;
+  log('■ ' + text);
+  vibrate(VIB.confirm);
+  say(`Enregistrement terminé, ${fmtDuration(rec.durationMs)}. Fichier téléchargé.`, { priority: 2 });
+}
+
+// ---------------- Rejeu d'une marche ----------------
+
+const replay = { rec: null, session: null, timer: null, events: [], name: '' };
+
+async function loadReplayFile(file) {
+  try {
+    replay.rec = await parseRecording(await file.arrayBuffer());
+    replay.name = file.name;
+    const r = replay.rec;
+    const info = `${file.name} : ORIANE ${r.appVersion || '?'}, ${fmtDuration(r.durationMs || 0)}, ${r.frames.length} analyses, ` +
+      `${r.frames.some((f) => f.jpeg) ? 'avec' : 'sans'} images, ${(r.live || []).length} alertes en direct.`;
+    $('#replayInfo').textContent = info;
+    log('Rejeu chargé : ' + info);
+    $('#btnReplayRun').disabled = false;
+    $('#btnReplayPlay').disabled = false;
+  } catch (e) {
+    replay.rec = null;
+    $('#replayInfo').textContent = 'Lecture impossible : ' + e.message;
+    log('Rejeu : ' + e.message);
+  }
+}
+
+/** Analyse instantanée : toutes les alertes du rejeu et le résumé, sans son. */
+function runReplay() {
+  if (!replay.rec) return;
+  stopReplay();
+  const session = new ReplaySession(replay.rec, { defaults: DEFAULTS });
+  const sum = session.run();
+  replay.events = session.events;
+  log(`▶ Rejeu de ${replay.name} (analyse instantanée) :`);
+  logEvents(session.events, '▶ ');
+  const text = 'Rejeu : ' + summaryText(sum.counter) + ` Direct : ${sum.liveEmitted} alerte(s).`;
+  log('▶ ' + text);
+  $('#replayInfo').textContent = text;
+  $('#btnReplayCsv').disabled = false;
+  return sum;
+}
+
+/** Rejeu en temps réel : images, sons, voix et vibrations, comme pendant la marche. */
+async function playReplay() {
+  if (!replay.rec) return;
+  stopReplay();
+  if (det.running) stopDetection(false);
+  await audio.init();
+  const session = new ReplaySession(replay.rec, { defaults: DEFAULTS });
+  replay.session = session;
+  replay.events = session.events;
+  $('#replayView').hidden = false;
+  $('#btnReplayStop').disabled = false;
+  log(`▶ Rejeu en temps réel de ${replay.name}.`);
+  const tick = async () => {
+    if (replay.session !== session) return;
+    if (session.done) {
+      const text = 'Rejeu terminé : ' + summaryText(session.counter.summary());
+      log('▶ ' + text);
+      $('#replayInfo').textContent = text;
+      stopReplay();
+      return;
+    }
+    const p = session.step();
+    logEvents(p.r.events, '▶ ');
+    emitOutputs(p.r);
+    drawReplayFrame(p).catch(() => {});
+    const next = session.nextTime;
+    replay.timer = setTimeout(tick, next == null ? 0 : Math.max(0, next - p.frame.tr));
+  };
+  tick();
+}
+
+function stopReplay() {
+  if (!replay.session) return;
+  clearTimeout(replay.timer);
+  replay.session = null;
+  audio.update([]);
+  renderObstacles([]);
+  $('#btnReplayStop').disabled = true;
+  $('#btnReplayCsv').disabled = !replay.events.length;
+}
+
+/** Image enregistrée + zones reconnues, dans le cadre de rejeu. */
+async function drawReplayFrame({ frame, labels }) {
+  const c = $('#replayView');
+  const { lw, lh } = frame;
+  const W = lw * 4;
+  const H = lh * 4;
+  if (c.width !== W) c.width = W;
+  if (c.height !== H) c.height = H;
+  const ctx = c.getContext('2d');
+  let photo = false;
+  if (frame.jpeg) {
+    try {
+      const bmp = await createImageBitmap(new Blob([fromBase64(frame.jpeg)], { type: 'image/jpeg' }));
+      ctx.drawImage(bmp, 0, 0, W, H);
+      bmp.close();
+      photo = true;
+    } catch {
+      /* image illisible : zones reconnues seules */
+    }
+  }
+  if (!photo) {
+    ctx.fillStyle = '#0b1020';
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (!settings.showMask && photo) return;
+  const img = new ImageData(lw, lh);
+  for (let i = 0; i < labels.length; i++) {
+    const col = FAMILY_COLORS[CLASS_FAMILY[labels[i]]];
+    img.data.set([col[0], col[1], col[2], photo ? col[3] : 255], 4 * i);
+  }
+  const tmp = new OffscreenCanvas(lw, lh);
+  tmp.getContext('2d').putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(tmp, 0, 0, W, H);
+}
 
 // ---------------- Écran allumé, capteurs ----------------
 
@@ -755,6 +973,7 @@ function applySettings() {
   sim.mult = settings.simMult;
   $('#camWrap').hidden = !(det.running && settings.showVideo);
   $('#mask').hidden = !settings.showMask;
+  $('#recBox').hidden = !settings.recording;
   if (!settings.showMask) {
     const c = $('#mask');
     c.getContext('2d').clearRect(0, 0, c.width, c.height);
@@ -838,6 +1057,10 @@ function bindSettings() {
         startDetection();
       }
       if (k === 'sim' && nav.active) startPositionFeed();
+      if (k === 'recording' && !settings.recording) {
+        if (recorder) stopRecording('désactivé');
+        stopReplay();
+      }
     });
   }
   applySettings();
@@ -880,7 +1103,8 @@ $('#btnTestVoice').addEventListener('click', async () => {
   vibrate([200]);
   say('Test de la voix. Poteau devant, 3 mètres.', { priority: 2, interrupt: true });
   const d = voice.diagnose();
-  log(`Diagnostic voix : ${d.total} voix, françaises : ${d.french.join(' ; ') || 'aucune'} ; utilisée : ${d.chosen}.`);
+  log(`Diagnostic voix : ${d.total} voix, françaises : ${d.french.join(' ; ') || 'aucune'} ; utilisée : ${d.chosen} ; ` +
+    `moteur : ${d.engine} ; réussites ${d.successes}, relances ${d.recoveries}, échecs ${d.failures} ; mains libres ${wake.active ? 'oui' : 'non'}.`);
   setTimeout(renderVoiceDiag, 4500);
 });
 $('#voiceSel').addEventListener('change', (e) => {
@@ -903,16 +1127,21 @@ $('#btnToggleKey').addEventListener('click', () => {
   i.type = i.type === 'password' ? 'text' : 'password';
 });
 $('#btnExportLog').addEventListener('click', () => {
-  const blob = new Blob(['horodatage;message\n' + logLines.join('\n')], { type: 'text/csv;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `oriane-journal-${new Date().toISOString().slice(0, 16).replace(':', 'h')}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    URL.revokeObjectURL(a.href);
-    a.remove();
-  }, 1000);
+  downloadText('horodatage;message\n' + logLines.join('\n'), `oriane-journal-${stamp()}.csv`);
+});
+$('#btnExportAlerts').addEventListener('click', () => {
+  downloadText(eventsToCsv(alertEvents, { time: (e) => e.wall }), `oriane-alertes-${stamp()}.csv`);
+});
+$('#btnRec').addEventListener('click', () => (recorder ? stopRecording() : startRecording()));
+$('#replayFile').addEventListener('change', (e) => {
+  const f = e.target.files?.[0];
+  if (f) loadReplayFile(f);
+});
+$('#btnReplayRun').addEventListener('click', runReplay);
+$('#btnReplayPlay').addEventListener('click', playReplay);
+$('#btnReplayStop').addEventListener('click', stopReplay);
+$('#btnReplayCsv').addEventListener('click', () => {
+  downloadText(eventsToCsv(replay.events), `oriane-alertes-rejeu-${stamp()}.csv`);
 });
 
 $('#profileSel').value = settings.profile;
@@ -929,4 +1158,7 @@ if (settings.wakeWord) {
 }
 
 // Accès pour les tests automatisés
-window.__oriane = { handleUtterance, state, settings, alerts, nav, det };
+window.__oriane = {
+  handleUtterance, state, settings, alerts, nav, det, env, counter, alertEvents, replay,
+  loadReplayFile, runReplay, playReplay, stopReplay, get recorder() { return recorder; },
+};

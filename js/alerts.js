@@ -1,4 +1,6 @@
 // ORIANE v2.1 — gestionnaire d'alertes avec priorisation (questionnaire du 20/11/2026).
+// v2.2-0 : chaque décision est décrite dans `events` (journal détaillé : raison, vitesse, TTC,
+// ce qui a été émis ou pourquoi l'alerte a été retenue). Les décisions elles-mêmes sont inchangées.
 //
 // Niveaux par type d'obstacle :
 //   urgent : niveau 1, voix + vibration longue dès l'entrée dans la zone, coupe tout le reste
@@ -84,6 +86,7 @@ export function dirWords(angle) {
   return 'à droite';
 }
 
+const fmtNum = (v) => String(Math.round(v * 10) / 10).replace('.', ',');
 const short = (label, d, angle) => `${cap(label)}, ${fmtMeters(d)}, ${dirShort(angle)}.`;
 
 export class AlertManager {
@@ -95,11 +98,13 @@ export class AlertManager {
     this.curbState = { done: false, danger: false, lostAt: null };
     this.darkSince = null;
     this.lastDarkWarn = -Infinity;
+    this.beepId = null;
   }
 
   reset() {
     this.tracks = [];
     this.curbState = { done: false, danger: false, lostAt: null };
+    this.beepId = null;
   }
 
   levelOf(key) {
@@ -115,10 +120,40 @@ export class AlertManager {
     return b.t - a.t >= 400 && a.d - b.d >= 0.15;
   }
 
+  /** Pour le journal : baisse de distance mesurée par _approaching, en clair. */
+  _approachText(tr) {
+    const h = tr.hist;
+    const a = h[0];
+    const b = h[h.length - 1];
+    return `se rapproche : ${(a.d - b.d).toFixed(2).replace('.', ',')} m en ${((b.t - a.t) / 1000).toFixed(1).replace('.', ',')} s`;
+  }
+
+  /**
+   * Pour le journal : vitesse de rapprochement (m/s, positive = se rapproche) par régression
+   * sur l'historique de la piste (≤ 1,5 s), et temps avant collision. N'influence aucune décision.
+   */
+  _kin(tr) {
+    const h = tr.hist;
+    if (h.length < 2) return { speed: null, ttc: null };
+    let mt = 0;
+    let md = 0;
+    for (const p of h) { mt += p.t; md += p.d; }
+    mt /= h.length;
+    md /= h.length;
+    let num = 0;
+    let den = 0;
+    for (const p of h) { num += (p.t - mt) * (p.d - md); den += (p.t - mt) ** 2; }
+    if (den <= 0) return { speed: null, ttc: null };
+    const speed = (-num / den) * 1000;
+    return { speed, ttc: speed > 0.05 ? tr.distance / speed : null };
+  }
+
   /**
    * obstacles : [{ family, label, distance, lateral, latMin, latMax, angle }]
    * ctx : { t, curb, lum, moving, indoor, navActive, muted }
-   * Renvoie { beeps (bips continus), pings (bips uniques), speech, vibrate, tracks }
+   * Renvoie { beeps (bips continus), pings (bips uniques), speech, vibrate, tracks, events }
+   * events : [{ t, type, id, key, label, level, distance, angle, lateral, speed, ttc, moving,
+   *            reason, output, emitted, blocked, danger }] — une ligne par décision (journal détaillé).
    */
   update(obstacles, ctx) {
     const t = ctx.t;
@@ -135,6 +170,21 @@ export class AlertManager {
     const out = { beeps: [], pings: [], speech: [], vibrate: null };
     const vibrate = (p) => {
       if (!out.vibrate || p === VIB.danger) out.vibrate = p;
+    };
+    const events = [];
+    const ev = (type, tr, o) => {
+      events.push({
+        t, type, id: tr ? tr.id : null,
+        key: o.key ?? (tr ? FAMILY_KEY[tr.family] : null),
+        label: tr ? tr.label : o.label,
+        level: o.level ?? tr?.level ?? null,
+        distance: tr ? tr.distance : o.distance ?? null,
+        angle: tr ? tr.angle : 0,
+        lateral: tr ? tr.lateral : 0,
+        ...(tr ? this._kin(tr) : { speed: null, ttc: null }),
+        moving,
+        reason: o.reason || '', output: o.output || '', emitted: !!o.emitted, blocked: o.blocked || '', danger: !!o.danger,
+      });
     };
 
     // 1. Suivi des obstacles d'une analyse à l'autre
@@ -196,7 +246,12 @@ export class AlertManager {
         const allowed = level === 'urgent' || (moving && !muted);
         if (allowed && !inDanger && LEVEL_RANK[level] >= 2) {
           tr.entryAt = t;
-          entries.push({ tr, level });
+          entries.push({ tr, level, reason: `entrée dans la zone (${fmtNum(range)} m), ${this._approachText(tr)}` });
+        } else if (!inDanger) {
+          ev('entree', tr, {
+            reason: `entrée dans la zone (${fmtNum(range)} m), ${this._approachText(tr)}`,
+            blocked: LEVEL_RANK[level] < 2 ? `niveau « ${level} » : rien hors danger` : muted ? 'mode silence' : 'immobile',
+          });
         }
       }
       // Danger : toujours signalé, même immobile ou en mode silence
@@ -204,6 +259,10 @@ export class AlertManager {
         tr.urgentDone = true;
         out.speech.push({ text: `Stop, ${tr.label}, ${dirShort(tr.angle)}.`, priority: 3, key: 'urgent' });
         vibrate(VIB.danger);
+        ev('danger', tr, {
+          reason: `à ${fmtNum(tr.distance)} m, sous la distance de danger (${fmtNum(dangerDist)} m)`,
+          output: 'voix « Stop » + vibration longue', emitted: true, danger: true,
+        });
       }
       // Bips continus : en marche, sous 2 m, pour un seul obstacle (le plus proche)
       if (moving && tr.distance < CONTINUOUS_BELOW && (LEVEL_RANK[level] >= 3 || inDanger)) {
@@ -211,6 +270,10 @@ export class AlertManager {
       }
     }
     if (nearest) out.beeps.push({ id: 't' + nearest.id, angle: nearest.angle, distance: nearest.distance, kind: 'object', label: nearest.label });
+    if (nearest && nearest.id !== this.beepId) {
+      ev('bips', nearest, { reason: `obstacle le plus proche, sous ${CONTINUOUS_BELOW} m`, output: 'bips continus', emitted: true });
+    }
+    this.beepId = nearest ? nearest.id : null;
 
     // 3. Annonces d'entrée : la plus importante d'abord, « plusieurs obstacles » si besoin
     if (entries.length) {
@@ -218,10 +281,14 @@ export class AlertManager {
       const top = entries[0];
       const sound = entries.find((e) => LEVEL_RANK[e.level] >= 3);
       if (sound) out.pings.push({ angle: sound.tr.angle, distance: sound.tr.distance });
-      if (entries.some((e) => e.level === 'urgent')) vibrate(VIB.danger);
+      const anyUrgent = entries.some((e) => e.level === 'urgent');
+      if (anyUrgent) vibrate(VIB.danger);
       else if (entries.some((e) => e.level === 'vibre')) vibrate(VIB.info);
       const speak = entries.find((e) => e.level === 'urgent' || (e.level === 'voix' && !nav));
+      let spoken = null;
+      let groupSaid = false;
       if (speak && (speak.level === 'urgent' || t - this.lastEntrySpeech >= gapMs)) {
+        spoken = speak;
         this.lastEntrySpeech = t;
         const phrase = short(speak.tr.label, speak.tr.distance, speak.tr.angle);
         // Obstacles apparus ensemble (moins d'une seconde d'écart) : regroupés
@@ -234,6 +301,20 @@ export class AlertManager {
       } else if (entries.length > 1 && top.level !== 'vibre' && !nav && t - this.lastEntrySpeech >= gapMs && entries.some((e) => e.level === 'son')) {
         this.lastEntrySpeech = t;
         out.speech.push({ text: 'Plusieurs obstacles devant.', priority: 1, key: 'obs' });
+        groupSaid = true;
+      }
+      // Journal : ce que chaque obstacle entré a déclenché
+      for (const e of entries) {
+        const outs = [];
+        if (e === sound) outs.push('bip');
+        if (e === spoken) outs.push(out.speech[out.speech.length - 1].text.startsWith('Plusieurs') ? 'voix (regroupée)' : 'voix');
+        if (groupSaid && e === top) outs.push('voix « Plusieurs obstacles devant »');
+        if (e.level === 'urgent') outs.push('vibration longue');
+        else if (e.level === 'vibre' && !anyUrgent) outs.push('vibration courte');
+        let blocked = '';
+        if (e === speak && !spoken) blocked = `voix retenue : moins de ${fmtNum(gapMs / 1000)} s depuis la dernière annonce`;
+        else if (!outs.length) blocked = e.level === 'voix' && nav ? 'guidage en cours' : 'regroupé avec un obstacle plus important';
+        ev('entree', e.tr, { level: e.level, reason: e.reason, output: outs.join(' + '), emitted: outs.length > 0, blocked, danger: e.level === 'urgent' });
       }
     }
 
@@ -247,11 +328,23 @@ export class AlertManager {
       const speed = dt > 0.8 ? (h0.d - tr.distance) / dt : 0;
       if (speed <= 1.5) continue;
       tr.approachDone = true;
+      let output = '';
       if (vLevel === 'urgent' || vLevel === 'voix') {
         out.speech.push({ text: `Attention, ${tr.label} qui approche, ${dirShort(tr.angle)}.`, priority: 3, key: 'vehicle' });
         vibrate(VIB.danger);
-      } else if (vLevel === 'son') out.pings.push({ angle: tr.angle, distance: tr.distance });
-      else if (vLevel === 'vibre') vibrate(VIB.info);
+        output = 'voix « Attention » + vibration longue';
+      } else if (vLevel === 'son') {
+        out.pings.push({ angle: tr.angle, distance: tr.distance });
+        output = 'bip';
+      } else if (vLevel === 'vibre') {
+        vibrate(VIB.info);
+        output = 'vibration courte';
+      }
+      ev('vehicule', tr, {
+        key: 'vehicule_approche', level: vLevel,
+        reason: `rapprochement ${fmtNum(speed)} m/s sur ${fmtNum(dt)} s (seuil 1,5 m/s, vitesse de marche non retirée)`,
+        output, emitted: !!output, blocked: output ? '' : `niveau « ${vLevel} »`, danger: vLevel === 'urgent',
+      });
     }
 
     // 5. Bord de trottoir
@@ -263,21 +356,41 @@ export class AlertManager {
       if (!cs.done) {
         cs.done = true;
         const allowed = cLevel === 'urgent' || (moving && !muted);
+        const curbEv = { key: 'trottoir', label: 'bord de trottoir', level: cLevel, distance: curb.distance, reason: `bordure à ${fmtNum(curb.distance)} m` };
+        let output = '';
         if (allowed && curb.distance >= urgentDist) {
           if (cLevel === 'urgent') {
             out.speech.push({ text: `Bord de trottoir, ${fmtMeters(curb.distance)}.`, priority: 3, key: 'curb' });
             vibrate(VIB.danger);
+            output = 'voix + vibration longue';
           } else if (cLevel === 'voix' && !nav) {
             out.speech.push({ text: `Bord de trottoir, ${fmtMeters(curb.distance)}.`, priority: 1, key: 'curb' });
             out.pings.push({ angle: 0, distance: curb.distance });
-          } else if (cLevel === 'voix' || cLevel === 'son') out.pings.push({ angle: 0, distance: curb.distance });
-          else if (cLevel === 'vibre') vibrate(VIB.info);
+            output = 'bip + voix';
+          } else if (cLevel === 'voix' || cLevel === 'son') {
+            out.pings.push({ angle: 0, distance: curb.distance });
+            output = 'bip';
+          } else if (cLevel === 'vibre') {
+            vibrate(VIB.info);
+            output = 'vibration courte';
+          }
+        }
+        if (curb.distance >= urgentDist) {
+          ev('trottoir', null, {
+            ...curbEv, output, emitted: !!output, danger: cLevel === 'urgent',
+            blocked: output ? '' : !allowed ? (muted ? 'mode silence' : 'immobile') : `niveau « ${cLevel} »`,
+          });
         }
       }
       if (curb.distance < urgentDist && !cs.danger) {
         cs.danger = true;
         out.speech.push({ text: 'Stop, bord de trottoir.', priority: 3, key: 'curb' });
         vibrate(VIB.danger);
+        ev('danger', null, {
+          key: 'trottoir', label: 'bord de trottoir', level: cLevel, distance: curb.distance,
+          reason: `bordure à ${fmtNum(curb.distance)} m, sous la distance de danger (${fmtNum(urgentDist)} m)`,
+          output: 'voix « Stop » + vibration longue', emitted: true, danger: true,
+        });
       }
     } else if (cs.done || cs.danger) {
       if (cs.lostAt == null) cs.lostAt = t;
@@ -291,11 +404,13 @@ export class AlertManager {
         else if (t - this.darkSince > 3000 && t - this.lastDarkWarn > 30000) {
           this.lastDarkWarn = t;
           out.speech.push({ text: 'Détection limitée : image trop sombre.', priority: 1, key: 'quality' });
+          ev('qualite', null, { key: 'qualite', label: 'image sombre', reason: 'image trop sombre depuis 3 s', output: 'voix', emitted: true });
         }
       } else this.darkSince = null;
     }
 
     out.tracks = this.tracks;
+    out.events = events;
     return out;
   }
 

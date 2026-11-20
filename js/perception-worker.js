@@ -1,4 +1,5 @@
 // ORIANE v2 — worker de perception : segmentation SegFormer-B0 (ADE20K) + géométrie au sol.
+// v2.2-0 : renvoie aussi les paramètres de caméra de l'analyse et, pendant un enregistrement, l'image JPEG.
 // Tourne hors du fil principal : l'interface, la voix et les bips ne sont jamais bloqués.
 
 import { analyze } from './geometry.js';
@@ -54,6 +55,8 @@ async function frame(m) {
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
   const px = ctx.getImageData(0, 0, w, h).data;
+  // Enregistrement d'une marche (H3) : l'image vue par le modèle, en JPEG, reste sur le téléphone.
+  const jpeg = m.record ? await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.6 }).catch(() => null) : null;
   const N = w * h;
   const input = new Float32Array(3 * N);
   let lum = 0;
@@ -88,7 +91,10 @@ async function frame(m) {
     pitchDeg: m.pitch, camHeight: m.camHeight, corridorHalf: m.corridorHalf, maxDist: 12,
   });
   self.postMessage(
-    { type: 'result', id: m.id, t: m.t, inferMs, device, lw, lh, labels, cropTop: m.cropTop, lum: lum / N, ...res },
+    {
+      type: 'result', id: m.id, t: m.t, inferMs, device, lw, lh, labels, cropTop: m.cropTop, lum: lum / N, jpeg, ...res,
+      geo: { frameW: m.frameW, frameH: m.frameH, fov: m.fov, camHeight: m.camHeight, corridorHalf: m.corridorHalf, pitch: m.pitch },
+    },
     [labels.buffer]
   );
 }

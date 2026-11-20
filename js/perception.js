@@ -15,6 +15,7 @@ export class Perception {
     this.device = null;
     this.stats = { inferMs: 0, latencyMs: 0, fps: 0 };
     this._lastResultAt = 0;
+    this.record = false; // enregistrement d'une marche : le worker renvoie aussi l'image JPEG
   }
 
   /** Charge le modèle dans le worker. Rejette si le chargement échoue (le secours COCO-SSD prend alors le relais). */
@@ -100,7 +101,7 @@ export class Perception {
       this.worker.postMessage({
         type: 'frame', id: ++this.frameId, bitmap, w, h, frameW: W, frameH: H, cropTop: sy / H,
         pitch: this.getPitch() ?? 12, camHeight: this.settings.camHeight, fov: this.settings.fov,
-        corridorHalf: this.settings.corridorWidth / 2, t: now,
+        corridorHalf: this.settings.corridorWidth / 2, t: now, record: !!this.record,
       }, [bitmap]);
     } catch (e) {
       this.busy = false;

@@ -1,4 +1,4 @@
-# ORIANE v2.1 — prototype web
+# ORIANE v2.2-0 — prototype web
 
 Guidage piéton vocal et détection d'obstacles par la caméra, pour personnes aveugles et malvoyantes.
 Prototype d'étude : **ORIANE complète la canne blanche ou le chien guide, il ne les remplace pas.**
@@ -24,6 +24,28 @@ Le premier lancement de la détection télécharge le modèle de scène (≈ 15 
 ### Tester sans sortir
 
 Réglages → **Simulation de marche** (× 3 ou × 10) : le trajet est joué virtuellement depuis votre position.
+
+## Enregistrer et rejouer une marche (v2.2-0, outils de test)
+
+La v2.2 réduit les fausses alertes. Pour régler les seuils sur de vraies marches, ORIANE peut les enregistrer :
+
+1. **Outils de test** → cocher **Enregistrement et rejeu de marches**.
+2. **Enregistrer une marche** (ou « Dis Oriane, commence l'enregistrement ») : la détection démarre, marchez normalement.
+3. **Arrêter et enregistrer le fichier** (ou « Dis Oriane, arrête l'enregistrement ») : un fichier
+   `oriane-rejeu-….json.gz` est téléchargé sur le téléphone (environ 3 Mo par minute avec les images, estimation ; 10 min au plus).
+4. **Rejouer** : choisir le fichier, puis **Analyser** (toutes les alertes et le résumé, instantanément) ou
+   **Rejouer en temps réel** (images, zones reconnues, sons et voix, comme pendant la marche). Fonctionne aussi sur ordinateur.
+
+Le fichier contient les images basse définition (224 px) vues par le modèle, les zones reconnues, l'orientation,
+l'accéléromètre et le GPS. Il reste sur le téléphone tant que vous ne le partagez pas vous-même.
+L'option « Garder les images » permet de l'enregistrer sans images.
+
+Autres outils :
+- **Compteur d'alertes** (bêta) dans la ligne d'état : alertes de la dernière minute, et moyenne par minute de marche
+  (cible v2.2 : 2 au plus hors danger, en rue calme).
+- **Journal détaillé** : chaque alerte avec sa raison, la vitesse de rapprochement et le temps avant collision (TTC) ;
+  en option, les alertes retenues et pourquoi (immobile, silence, niveau…). Export CSV : Journal → Exporter les alertes détaillées.
+- Sur ordinateur : `node tools/rejeu.mjs fichier.json.gz [--tout] [--set alertRange=4] [--set levels.poteau=jamais] [--csv=sortie.csv]`.
 
 ## Priorisation des alertes (v2.1, questionnaire du 20/11/2026)
 
@@ -58,6 +80,7 @@ personnes, véhicules, végétation, eau, bord de trottoir, et tout autre obstac
 | « oui », « ok », « deux », « trois », « suivant » | choix parmi les propositions |
 | « active la détection » / « arrête la détection » | détection d'obstacles |
 | « silence » / « reprends » | coupe les alertes non urgentes / les rétablit |
+| « commence l'enregistrement » / « arrête l'enregistrement » | enregistre une marche (outils de test) |
 | « qu'y a-t-il devant moi » | décrit ce que voit la caméra |
 | « répète », « où suis-je », « combien reste-t-il » | guidage |
 | « arrête le guidage », « aide » | |
@@ -82,13 +105,16 @@ Vidéo : 720p maximum (480p en option) ; l'analyse porte sur une image réduite 
 de 4 à 8 fois par seconde, pour limiter la latence.
 
 Mode testeur : couleurs des zones reconnues, couloir surveillé en jaune, obstacles suivis avec leur
-distance, bord de trottoir en pointillés violets. Journal exportable en CSV (Réglages → Journal).
+distance, bord de trottoir en pointillés violets. Journal exportable en CSV (Journal).
 
 ## Si la voix ne sort pas (constaté sur OnePlus)
 
 Réglages → Voix → **Tester la voix** affiche les voix françaises disponibles. Essayer une autre voix dans
 « Voix utilisée », vérifier le volume Multimédia, sinon : Paramètres Android → Paramètres supplémentaires →
 Langues et saisie → Synthèse vocale → moteur « Services vocaux Google », langue Français, voix française téléchargée.
+
+Depuis la v2.2-0, si le moteur vocal de Chrome reste bloqué, ORIANE le relance tout seul et redit la phrase
+(journal : « 🔁 Voix bloquée… moteur relancé »). En mode mains libres, la voix attend que le micro soit libéré.
 
 ## Limites connues
 
@@ -104,8 +130,14 @@ Langues et saisie → Synthèse vocale → moteur « Services vocaux Google », 
 Site statique sans compilation : `index.html`, `css/`, `js/`.
 
 ```bash
-python3 -m http.server 8000   # puis http://localhost:8000
-npm test                      # tests de la logique (Node 20+)
+python3 -m http.server 8000           # puis http://localhost:8000
+npm test                              # tests de la logique (Node 20+)
+npm run e2e                           # bout en bout : enregistrement et rejeu (Playwright + Chromium)
+node tools/rejeu.mjs fichier.json.gz  # rejouer une marche enregistrée
 ```
+
+Les règles d'alerte et le traitement des analyses sont des modules purs, partagés par le direct et le rejeu :
+`js/sensors.js` (inclinaison, marche), `js/pipeline.js` (analyse → alertes), `js/alerts.js`, `js/instruments.js`
+(compteur, journal), `js/rejeu.js` (format d'enregistrement, rejeu).
 
 Données cartographiques © contributeurs [OpenStreetMap](https://www.openstreetmap.org/copyright).

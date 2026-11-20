@@ -38,7 +38,7 @@ Spécification détaillée et critères d'acceptation : FON-20 à FON-41, NFR-20
 
 ## Points ouverts
 
-- Voix muette sur le OnePlus : vérifier si le choix de voix ou le moteur « Services vocaux Google » a réglé le problème.
+- Voix muette sur le OnePlus : correctif défensif en 2.2-0, **à vérifier sur le téléphone**. Hypothèses : (1) moteur de Chrome bloqué après une phrase coupée ou un passage en arrière-plan (plus rien ne sort) → si une phrase ne démarre pas en 3 s : `cancel()` puis nouvel essai avec le moteur par défaut, `resume()` si en pause ; (2) « Dis Oriane » : la voix partait alors que le micro n'était pas libéré → elle attend la fin réelle de l'écoute (400 ms au plus). Le journal note « 🔁 Voix bloquée… moteur relancé » ou « ⚠️ Voix muette » avec l'état du moteur, la voix et le mode mains libres.
 - Vitesse réelle de la segmentation sur le OnePlus (WebGPU ou processeur) : lire la ligne d'état.
 - Étalonnage des distances sur le terrain.
 - Testeurs aveugles ou malvoyants à trouver (côté Adrien).
@@ -50,13 +50,26 @@ Spécification détaillée et critères d'acceptation : FON-20 à FON-41, NFR-20
 - Constats complémentaires :
   - le lissage de `beta` dans `app.js` (0,7 / 0,3 à chaque événement, ≈ 60 Hz) ne dure qu'environ 50 ms, pas 300 ms : il ne filtre pas l'oscillation des pas ;
   - `VIB` n'a que 3 motifs, FON-32 en demande 4 (manque « double = obstacle sur le chemin ») ;
-  - le script e2e sera recréé avec Playwright (Chromium préinstallé dans l'environnement cloud).
+  - le script e2e est recréé avec Playwright (`tests/e2e/rejeu.e2e.mjs`).
 - Choix pour le rejeu (FON-40) : enregistrer aussi la carte de segmentation, pour un rejeu identique à chaque passage, même sans WebGPU.
 - Travail sur la branche `claude/tender-hawking-omq7tk`, à fusionner dans `main` pour publier sur GitHub Pages.
+
+## Lot 2.2-0 Instruments — fait (20/11/2026, non publié)
+
+- `js/sensors.js` et `js/pipeline.js` : capteurs (inclinaison, marche) et traitement d'une analyse sortis de `app.js`, **comportement v2.1 inchangé**, partagés par le direct et le rejeu.
+- Journal détaillé : `AlertManager.update(...).events` décrit chaque décision (raison, vitesse de rapprochement par régression, TTC, sortie émise ou raison de la retenue). Affichage dans le journal, export CSV « alertes détaillées ». Les décisions ne changent pas.
+- Compteur H1 (bêta, actif par défaut) dans la ligne d'état : dernière minute + moyenne par minute de marche (NFR-20).
+- Enregistrement H3 (désactivé par défaut, Outils de test) : images 224 px (JPEG 0,6, facultatives), cartes de segmentation (RLE), inclinaison et paramètres caméra de chaque analyse, capteurs bruts en pleine précision, alertes du direct ; fichier `.json.gz` téléchargé localement, 10 min au plus, sans aucune clé (`safeSettings`).
+- Rejeu : dans l'appli (analyse instantanée ou temps réel avec images, sons, voix) et en ligne de commande (`tools/rejeu.mjs`). Sans le modèle : les cartes repassent par la géométrie, les capteurs et les alertes actuels. Option `--inclinaison=enregistree` pour reproduire exactement le direct.
+- Tests : 46 unitaires + 2 `todo` qui reproduisent les deux défauts du terrain sur des marches synthétiques (`tests/fixtures.js`) : voiture garée (±2° d'oscillation suffisent) et piéton au même pas (±5°). À faire passer au lot 2.2-2. E2E Playwright : `npm run e2e`.
+- Correctifs au passage : `[hidden]` respecté partout en CSS (la case « zones reconnues » ne masquait pas le calque), cases à cocher qui rétrécissaient avec un long libellé.
+
+**Pour clore le lot** : publier sur GitHub Pages (fusion dans `main`), puis Adrien enregistre 3 marches (voitures garées, suivre un piéton, longer une façade) et envoie les fichiers ; ils deviennent les rejeux de référence (FON-25, FON-28, FON-30, NFR-21).
 
 ## Pour lancer les tests
 
 ```bash
 npm test
-python3 -m http.server 8765 --bind 127.0.0.1   # pour l'e2e Puppeteer (script hors dépôt à recréer si besoin)
+npm run e2e                          # Playwright + Chromium (lance son propre serveur sur le port 8765)
+node tools/rejeu.mjs fichier.json.gz # rejeu d'une marche enregistrée
 ```

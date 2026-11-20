@@ -1,4 +1,11 @@
 // ORIANE — synthèse vocale (file avec priorités) et reconnaissance vocale.
+//
+// v2.2-0, voix muette sur Android : deux défauts de Chrome sont contournés.
+// 1. Moteur bloqué : après une phrase coupée ou un passage en arrière-plan, speechSynthesis peut rester
+//    « en cours » sans jamais parler ; toutes les phrases suivantes sont alors muettes. Si une phrase n'a
+//    pas démarré au bout de 3 s : cancel(), puis nouvel essai (avec le moteur par défaut du téléphone).
+//    Le moteur est aussi relancé (resume) s'il est en pause.
+// 2. Micro occupé : avec « Dis Oriane », la voix attend que l'écoute soit vraiment arrêtée (beforeSpeak).
 
 /**
  * File de messages parlés.
@@ -19,8 +26,12 @@ export class Voice {
     this.voices = [];
     this.preferredURI = '';
     this.onerror = null; // (code, texte) : échec de la synthèse
+    this.onrecover = null; // (code, texte) : phrase muette rattrapée par un nouvel essai
+    this.beforeSpeak = null; // async () : à attendre avant de parler (libérer le micro)
     this.failures = 0;
     this.successes = 0;
+    this.recoveries = 0;
+    this.startTimeout = 3000; // ms sans démarrage avant de relancer le moteur
     if (this.supported) {
       const load = () => {
         this.voices = speechSynthesis.getVoices();
@@ -61,7 +72,16 @@ export class Voice {
       chosen: this.voice ? `${this.voice.name} (${this.voice.lang})` : 'moteur par défaut du téléphone',
       failures: this.failures,
       successes: this.successes,
+      recoveries: this.recoveries,
+      engine: this.engineState(),
     };
+  }
+
+  /** État du moteur de Chrome, pour le journal. */
+  engineState() {
+    if (!this.supported) return 'absent';
+    const ss = speechSynthesis;
+    return `parle ${ss.speaking ? 'oui' : 'non'}, en attente ${ss.pending ? 'oui' : 'non'}, en pause ${ss.paused ? 'oui' : 'non'}`;
   }
 
   say(text, { priority = 1, interrupt = false, key = null } = {}) {
@@ -83,7 +103,7 @@ export class Voice {
       if (i < 0) i = this.queue.length;
       this.queue.splice(i, 0, item);
       // Une alerte (priorité 3) coupe un message moins prioritaire en cours.
-      if (this.current && priority >= 3 && this.current.priority < priority) speechSynthesis.cancel();
+      if (this.current && priority >= 3 && this.current.priority < priority) this._cancelCurrent();
       // Évite l'accumulation de vieux messages d'information.
       while (this.queue.length > 4) {
         const idx = this.queue.map((q) => q.priority).lastIndexOf(1);
@@ -105,49 +125,112 @@ export class Voice {
   _flush() {
     for (const it of this.queue) it.resolve();
     this.queue = [];
-    if (this.current) speechSynthesis.cancel();
+    if (this.current) this._cancelCurrent();
   }
 
-  _next() {
+  /** Coupe la phrase en cours ; si elle attend encore le micro, elle est abandonnée sans être dite. */
+  _cancelCurrent() {
+    if (this._waiting) {
+      const it = this.current;
+      this._token++;
+      this._waiting = false;
+      this.current = null;
+      it.resolve();
+      this.onstate?.(false);
+    } else speechSynthesis.cancel();
+  }
+
+  async _next() {
     if (this.current || !this.queue.length) return;
     const item = this.queue.shift();
     this.current = item;
     const token = ++this._token;
+    this.onstate?.(true);
+    // Mains libres : attendre que le micro soit libéré avant de parler (borné par l'appelant).
+    if (this.beforeSpeak) {
+      this._waiting = true;
+      try {
+        await this.beforeSpeak();
+      } catch {
+        /* on parle quand même */
+      }
+      if (this._token !== token || this.current !== item) return;
+      this._waiting = false;
+    }
+    this._speak(item, token, 0);
+  }
+
+  /** Fin d'une phrase (dite, abandonnée ou en échec) : passe à la suivante. */
+  _done(item, token) {
+    if (this._token !== token || this.current !== item) return;
+    this.current = null;
+    item.resolve();
+    this.onstate?.(false);
+    setTimeout(() => this._next(), 80);
+  }
+
+  /** Un essai de la phrase ; attempt 1 = nouvel essai après un moteur bloqué. */
+  _speak(item, token, attempt) {
+    const ss = speechSynthesis;
+    const alive = () => this._token === token && this.current === item && !att.stale;
+    const att = { stale: false };
+    if (ss.paused) ss.resume();
     const u = new SpeechSynthesisUtterance(item.text);
     u.lang = 'fr-FR';
-    if (this.voice) u.voice = this.voice;
+    // Nouvel essai : moteur par défaut du téléphone, au cas où la voix choisie serait en cause.
+    if (this.voice && attempt === 0) u.voice = this.voice;
     u.rate = this.rate;
-    const done = () => {
-      if (this._token !== token || this.current !== item) return;
-      this.current = null;
-      item.resolve();
-      this.onstate?.(false);
-      setTimeout(() => this._next(), 80);
-    };
     let started = false;
-    u.onstart = () => {
-      started = true;
-      this.successes++;
+    let endTimer = null;
+    const finish = () => {
+      if (!alive()) return;
+      att.stale = true;
+      clearTimeout(endTimer);
+      clearTimeout(startTimer);
+      this._done(item, token);
     };
-    u.onend = done;
+    const retryOrFail = (code) => {
+      if (!alive()) return;
+      att.stale = true;
+      clearTimeout(endTimer);
+      clearTimeout(startTimer);
+      if (attempt === 0) {
+        this.recoveries++;
+        this.onrecover?.(code, item.text);
+        ss.cancel(); // débloque la file de Chrome
+        setTimeout(() => {
+          if (this._token === token && this.current === item) this._speak(item, token, 1);
+        }, 250);
+      } else {
+        this.failures++;
+        this.onerror?.(code, item.text);
+        ss.cancel();
+        this._done(item, token);
+      }
+    };
+    u.onstart = () => {
+      if (!alive()) return;
+      started = true;
+      clearTimeout(startTimer);
+      this.successes++;
+      // Filet de sécurité : Chrome Android oublie parfois l'événement de fin.
+      endTimer = setTimeout(finish, 2500 + (item.text.length * 110) / this.rate);
+    };
+    u.onend = finish;
     u.onerror = (e) => {
-      if (e.error !== 'interrupted' && e.error !== 'canceled') {
+      if (e.error === 'interrupted' || e.error === 'canceled') return finish();
+      if (started) {
         this.failures++;
         this.onerror?.(e.error || 'erreur', item.text);
+        return finish();
       }
-      done();
+      retryOrFail(e.error || 'erreur');
     };
-    // Aucune voix n'a démarré au bout de 4 s : on le signale (moteur absent, voix non installée…)
-    setTimeout(() => {
-      if (!started && this._token === token && this.current === item) {
-        this.failures++;
-        this.onerror?.('no-start', item.text);
-      }
-    }, 4000);
-    this.onstate?.(true);
-    speechSynthesis.speak(u);
-    // Filet de sécurité : Chrome Android oublie parfois l'événement de fin.
-    setTimeout(done, 2500 + (item.text.length * 110) / this.rate);
+    // Aucune voix n'a démarré : moteur bloqué, voix absente… → nouvel essai, puis échec signalé.
+    const startTimer = setTimeout(() => {
+      if (!started) retryOrFail('no-start');
+    }, this.startTimeout);
+    ss.speak(u);
   }
 }
 
