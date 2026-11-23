@@ -9,7 +9,7 @@ ORIANE : guidage piéton vocal + détection d'obstacles par caméra + sons spati
 - Dépôt : <https://github.com/AdrienFrl/oriane> (public, branche `main`)
 - En ligne : <https://adrienfrl.github.io/oriane/> (GitHub Pages, déployé depuis `main`, racine)
 - Téléphone de test : OnePlus Nord 2T, Chrome Android
-- Version en ligne : **v2.1**. En développement : **v2.2 anti-surcharge**, lot 2.2-0 fait (`VERSION` = `2.2-0` dans `js/app.js`, voir `source/HANDOFF.md`)
+- Version en ligne : **v2.2-0** (lot 2.2-0 publié le 20/11). En cours : **v2.2-0.1** (voix Google de Chrome). `VERSION` dans `js/app.js` ; voir `source/HANDOFF.md`
 
 ## Règles impératives
 
@@ -57,7 +57,7 @@ ORIANE : guidage piéton vocal + détection d'obstacles par caméra + sons spati
 ### Développement
 
 - `package.json` : `"type": "module"`, script `test` = `node --test tests/*.test.js`. Aucune dépendance npm pour l'appli.
-- Tests e2e : `npm run e2e` (`tests/e2e/rejeu.e2e.mjs`). Playwright et Chromium préinstallés dans l'environnement cloud (sinon `PLAYWRIGHT_CHROMIUM=/chemin/chrome`). Le script lance `python3 -m http.server 8765`, une fausse caméra Chromium et un faux module transformers ; tout autre accès réseau est bloqué. Il enregistre une marche dans l'appli, relit le fichier sous Node, vérifie que le rejeu donne les mêmes alertes que le direct, puis rejoue dans l'appli.
+- Tests e2e : `npm run e2e` (`tests/e2e/rejeu.e2e.mjs`, puis `tests/e2e/voix.e2e.mjs` : aucune voix listée, l'appli doit quand même parler). Playwright et Chromium préinstallés dans l'environnement cloud (sinon `PLAYWRIGHT_CHROMIUM=/chemin/chrome`). Le script lance `python3 -m http.server 8765`, une fausse caméra Chromium et un faux module transformers ; tout autre accès réseau est bloqué. Il enregistre une marche dans l'appli, relit le fichier sous Node, vérifie que le rejeu donne les mêmes alertes que le direct, puis rejoue dans l'appli.
 - Rejeu en ligne de commande : `node tools/rejeu.mjs fichier.json.gz [--tout] [--inclinaison=enregistree] [--set cle=valeur] [--csv=…] [--json]`.
 - Marches synthétiques pour les tests : `tests/fixtures.js` (`makeWalk`) ; les défauts connus y sont reproduits en tests `todo`.
 
@@ -80,12 +80,12 @@ ORIANE : guidage piéton vocal + détection d'obstacles par caméra + sons spati
 | `js/nav.js` | Moteur de guidage : suivi de l'itinéraire, virages, repères, écarts, arrivée |
 | `js/geo.js` | Géocodage, itinéraire, repères Overpass |
 | `js/places.js` | Recherche en langage naturel (`parseRequest`, `findPlaces`), alias d'enseignes, catégories |
-| `js/speech.js` | Synthèse vocale à priorités, choix et diagnostic de la voix, reconnaissance |
+| `js/speech.js` | Synthèse vocale à priorités (voix Google de Chrome, sinon voix fr-FR par défaut ; jamais de liste de voix obligatoire), diagnostic, reconnaissance. Importé avec `?v=` dans `app.js` pour contourner le cache |
 | `js/wake.js` | Mot d'activation « Dis Oriane » |
 | `js/audio.js` | Sons spatialisés, `ping` |
 | `js/sim.js` | Simulation de marche le long d'un itinéraire |
 | `js/util.js` | Géométrie, formats français, stockage local |
-| `tests/core.test.js`, `tests/v2.test.js`, `tests/v22.test.js`, `tests/voix.test.js` | 55 tests unitaires + 2 `todo` (FON-25, FON-28, à corriger au lot 2.2-2) ; `voix.test.js` simule le moteur vocal de Chrome |
+| `tests/core.test.js`, `tests/v2.test.js`, `tests/v22.test.js`, `tests/voix.test.js` | 58 tests unitaires + 2 `todo` (FON-25, FON-28, à corriger au lot 2.2-2) ; `voix.test.js` simule le moteur vocal de Chrome |
 
 ## Commandes
 

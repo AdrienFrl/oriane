@@ -3,7 +3,7 @@
 // v2.2-0 : capteurs et traitement des analyses en modules purs (sensors.js, pipeline.js), partagés avec
 // le rejeu ; journal détaillé des alertes, compteur par minute (bêta), enregistrement et rejeu d'une marche.
 
-import { Voice, listen, hasRecognition } from './speech.js';
+import { Voice, listen, hasRecognition } from './speech.js?v=2201'; // ?v : force la nouvelle voix malgré le cache
 import { SpatialAudio } from './audio.js';
 import { reverse, route, landmarks } from './geo.js';
 import { findPlaces } from './places.js';
@@ -21,7 +21,7 @@ import { Recorder, parseRecording, ReplaySession, fromBase64 } from './rejeu.js'
 import { FAMILY_COLORS, CLASS_FAMILY } from './classes.js';
 
 const $ = (s) => document.querySelector(s);
-const VERSION = '2.2-0';
+const VERSION = '2.2-0.1';
 
 const DEFAULTS = {
   orsKey: '',
@@ -61,6 +61,11 @@ const settings = { ...DEFAULTS, ...store.get('settings', {}) };
 // v2.1 : réglages issus du questionnaire de priorisation (remplacent ceux de la v2)
 if ((settings.settingsVersion || 0) < 21) {
   Object.assign(settings, { alertRange: 3, corridorWidth: 1.2, urgentDist: 1.5, minGap: 2, vehicleRange: 10, profile: 'aveugle', levels: { ...PRESETS.aveugle }, settingsVersion: 21 });
+  store.set('settings', settings);
+}
+// v2.2-0.1 : retour à la voix Google de Chrome par défaut (une voix choisie à la main a pu rendre l'appli muette)
+if ((settings.settingsVersion || 0) < 22) {
+  Object.assign(settings, { voiceURI: '', settingsVersion: 22 });
   store.set('settings', settings);
 }
 settings.levels = { ...PRESETS.aveugle, ...(settings.levels || {}) };
@@ -127,10 +132,10 @@ voice.onsay = (t) => log('🔊 ' + t);
 voice.setPreferred(settings.voiceURI);
 let voiceWarned = false;
 voice.onrecover = (code, text) => {
-  log(`🔁 Voix bloquée (${code}), moteur relancé pour : « ${text.slice(0, 60)} » [${voice.engineState()}]`);
+  log(`🔁 Voix « ${voice.voice?.name} » en erreur (${code}) : phrase redite avec la voix de Chrome : « ${text.slice(0, 60)} »`);
 };
 voice.onerror = (code, text) => {
-  log(`⚠️ Voix muette (${code}) pour : « ${text.slice(0, 60)} » [${voice.engineState()}, voix ${voice.voice?.name || 'par défaut'}, mains libres ${wake.active ? 'oui' : 'non'}]`);
+  log(`⚠️ Voix muette (${code}) pour : « ${text.slice(0, 60)} » [${voice.engineState()}, voix ${voice.voice?.name || 'de Chrome'}, mains libres ${wake.active ? 'oui' : 'non'}]`);
   const box = $('#voiceWarn');
   box.hidden = false;
   if (!voiceWarned) {
@@ -148,8 +153,8 @@ function fillVoices() {
     o.textContent = label;
     sel.appendChild(o);
   };
-  add('', 'Automatique (voix française du téléphone)');
-  add('system', 'Moteur par défaut, sans choisir de voix');
+  add('', 'Automatique : voix Google de Chrome (recommandé)');
+  add('system', 'Voix française par défaut de Chrome, sans choisir');
   for (const v of voice.frenchVoices) add(v.voiceURI, `${v.name} — ${v.lang}${v.localService ? '' : ' (en ligne)'}`);
   sel.value = [...sel.options].some((o) => o.value === keep) ? keep : '';
   renderVoiceDiag();
@@ -158,11 +163,15 @@ function renderVoiceDiag() {
   const d = voice.diagnose();
   $('#voiceDiag').textContent = !d.supported
     ? 'Synthèse vocale absente de ce navigateur.'
-    : `${d.total} voix sur le téléphone, dont ${d.french.length} en français. Voix utilisée : ${d.chosen}.` +
+    : (d.total
+      ? `${d.total} voix listées par Chrome, dont ${d.french.length} en français. Voix utilisée : ${d.chosen}.`
+      : 'Chrome ne liste aucune voix : c’est courant sur Android, ORIANE parle avec la voix française par défaut de Chrome.') +
       (d.failures ? ` Échecs : ${d.failures}.` : '') + (d.recoveries ? ` Moteur relancé : ${d.recoveries} fois.` : '');
 }
 voice.onvoices = fillVoices;
 const say = (t, o) => voice.say(t, o);
+// Chrome sur Android n'autorise la voix qu'après un geste : on la déverrouille au premier appui.
+document.addEventListener('pointerdown', () => voice.unlock(), { once: true, capture: true });
 function vibrate(pattern) {
   if (settings.vibrations && navigator.vibrate) {
     try {

@@ -2,40 +2,55 @@
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 
-/** Faux speechSynthesis : `stuck` = le moteur accepte les phrases mais ne parle jamais. */
+const GOOGLE = { name: 'Google français', lang: 'fr-FR', localService: false, voiceURI: 'Google français' };
+const LOCAL = { name: 'Français France', lang: 'fr-FR', localService: true, voiceURI: 'fr-fr' };
+
+/**
+ * Faux speechSynthesis.
+ * voices : voix listées ; failNext : nombre de phrases en erreur `synthesis-failed` avant le début ;
+ * noStart : Chrome Android qui ne signale pas le début ; durationMs : durée d'une phrase.
+ */
 class FakeSynth extends EventTarget {
   constructor() {
     super();
     this.spoken = [];
     this.calls = [];
-    this.stuck = 0; // nombre de phrases qui resteront bloquées
+    this.voices = [LOCAL, GOOGLE];
+    this.failNext = 0;
+    this.noStart = false;
+    this.durationMs = 500;
     this.speaking = false;
     this.pending = false;
     this.paused = false;
     this.current = null;
   }
   getVoices() {
-    return [{ name: 'Français France', lang: 'fr-FR', localService: true, voiceURI: 'fr-fr' }];
+    return this.voices;
   }
   speak(u) {
-    this.calls.push({ text: u.text, voice: u.voice?.name || null });
+    this.calls.push({ text: u.text, voice: u.voice?.name || null, lang: u.lang, volume: u.volume });
     this.speaking = true;
-    if (this.stuck > 0) {
-      this.stuck--;
-      this.current = u; // ne démarre jamais
+    this.current = u;
+    if (this.failNext > 0) {
+      this.failNext--;
+      setTimeout(() => {
+        if (this.current !== u) return;
+        this.current = null;
+        this.speaking = false;
+        u.onerror?.({ error: 'synthesis-failed' });
+      }, 30);
       return;
     }
-    this.current = u;
     setTimeout(() => {
       if (this.current !== u) return;
-      u.onstart?.();
+      if (!this.noStart) u.onstart?.();
       setTimeout(() => {
         if (this.current !== u) return;
         this.spoken.push(u.text);
         this.current = null;
         this.speaking = false;
         u.onend?.();
-      }, 500);
+      }, this.durationMs);
     }, 50);
   }
   cancel() {
@@ -52,8 +67,9 @@ class FakeSynth extends EventTarget {
 }
 
 let synth;
-async function load() {
+async function load(setup = () => {}) {
   synth = new FakeSynth();
+  setup(synth);
   globalThis.window = { speechSynthesis: synth };
   globalThis.speechSynthesis = synth;
   globalThis.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
@@ -80,39 +96,74 @@ test('voix : phrases dites dans l’ordre des priorités', async () => {
   mock.timers.reset();
 });
 
-test('voix : moteur Chrome bloqué → relancé (cancel) et phrase redite avec le moteur par défaut', async () => {
-  mock.timers.enable({ apis: ['setTimeout'] });
+test('voix : la voix Google de Chrome est choisie, même si une voix locale est listée avant', async () => {
   const v = await load();
-  const recovered = [];
-  const errors = [];
-  v.onrecover = (code) => recovered.push(code);
-  v.onerror = (code) => errors.push(code);
-  synth.stuck = 1;
-  v.say('Poteau, droite.', { priority: 2 });
-  v.say('Virage à gauche.', { priority: 2 });
-  await run(6000);
-  assert.deepEqual(synth.spoken, ['Poteau, droite.', 'Virage à gauche.']);
-  assert.deepEqual(recovered, ['no-start']);
-  assert.deepEqual(errors, [], 'pas d’alerte « voix muette » quand le nouvel essai réussit');
-  const speaks = synth.calls.filter((c) => c.text === 'Poteau, droite.');
-  assert.deepEqual(speaks.map((c) => c.voice), ['Français France', null], 'nouvel essai sans voix imposée');
-  assert.ok(synth.calls.some((c) => c.cancel));
+  assert.equal(v.voice.name, 'Google français');
+  assert.equal(v.frenchVoices[0].name, 'Google français');
+  v.setPreferred('fr-fr');
+  assert.equal(v.voice.name, 'Français France', 'voix choisie à la main');
+  v.setPreferred('system');
+  assert.equal(v.voice, null, 'voix par défaut de Chrome');
+  v.setPreferred('voix-disparue');
+  assert.equal(v.voice.name, 'Google français', 'voix choisie absente : retour à Google');
+});
+
+test('voix : aucune voix listée (Android) → la phrase part quand même, en fr-FR, sans voix imposée', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const v = await load((s) => (s.voices = []));
+  assert.equal(v.voice, null);
+  assert.match(v.diagnose().chosen, /voix française par défaut de Chrome/);
+  v.say('Je cherche.', { priority: 2 });
+  await run(1000);
+  assert.deepEqual(synth.calls, [{ text: 'Je cherche.', voice: null, lang: 'fr-FR', volume: undefined }]);
+  assert.deepEqual(synth.spoken, ['Je cherche.']);
   mock.timers.reset();
 });
 
-test('voix : moteur muet deux fois → échec signalé, la file continue', async () => {
+test('voix : Chrome ne signale pas le début → une longue phrase n’est jamais coupée', async () => {
   mock.timers.enable({ apis: ['setTimeout'] });
-  const v = await load();
+  const v = await load((s) => {
+    s.noStart = true;
+    s.durationMs = 6000;
+  });
   const errors = [];
-  v.onerror = (code, text) => errors.push([code, text]);
-  synth.stuck = 2;
+  v.onerror = (c) => errors.push(c);
+  const text = 'J’ai trouvé 3 lieux. Un : Intermarché, à 800 mètres. Deux : Carrefour, à 1,2 kilomètre.';
+  v.say(text, { priority: 2 });
+  await run(7000);
+  assert.deepEqual(synth.spoken, [text]);
+  assert.ok(!synth.calls.some((c) => c.cancel), 'aucune coupure');
+  assert.deepEqual(errors, []);
+  mock.timers.reset();
+});
+
+test('voix : erreur de la voix choisie → phrase redite avec la voix de Chrome ; erreur sans voix → signalée, la file continue', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const v = await load((s) => (s.failNext = 1));
+  const rec = [];
+  const errors = [];
+  v.onrecover = (c) => rec.push(c);
+  v.onerror = (c, t) => errors.push([c, t]);
+  v.say('Poteau, droite.', { priority: 2 });
+  await run(1500);
+  assert.deepEqual(synth.calls.map((c) => c.voice), ['Google français', null]);
+  assert.deepEqual(synth.spoken, ['Poteau, droite.']);
+  assert.deepEqual(rec, ['synthesis-failed']);
+  assert.deepEqual(errors, []);
+  synth.failNext = 2;
   v.say('Un.', { priority: 2 });
   v.say('Deux.', { priority: 2 });
-  await run(9000);
-  assert.deepEqual(errors, [['no-start', 'Un.']]);
-  assert.deepEqual(synth.spoken, ['Deux.']);
-  assert.equal(v.failures, 1);
+  await run(3000);
+  assert.deepEqual(errors, [['synthesis-failed', 'Un.']]);
+  assert.deepEqual(synth.spoken, ['Poteau, droite.', 'Deux.']);
   mock.timers.reset();
+});
+
+test('voix : déverrouillage au premier appui (phrase muette, une seule fois)', async () => {
+  const v = await load();
+  v.unlock();
+  v.unlock();
+  assert.deepEqual(synth.calls, [{ text: ' ', voice: null, lang: 'fr-FR', volume: 0 }]);
 });
 
 test('voix : moteur en pause (arrière-plan) → resume avant de parler', async () => {
@@ -121,7 +172,7 @@ test('voix : moteur en pause (arrière-plan) → resume avant de parler', async 
   synth.paused = true;
   v.say('Bonjour.', { priority: 2 });
   await run(1000);
-  assert.ok(synth.calls[0].resume);
+  assert.ok(synth.calls[0].resume, 'resume appelé avant de parler');
   assert.deepEqual(synth.spoken, ['Bonjour.']);
   mock.timers.reset();
 });

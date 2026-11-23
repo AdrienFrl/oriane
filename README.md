@@ -1,4 +1,4 @@
-# ORIANE v2.2-0 — prototype web
+# ORIANE v2.2-0.1 — prototype web
 
 Guidage piéton vocal et détection d'obstacles par la caméra, pour personnes aveugles et malvoyantes.
 Prototype d'étude : **ORIANE complète la canne blanche ou le chien guide, il ne les remplace pas.**
@@ -113,8 +113,10 @@ Réglages → Voix → **Tester la voix** affiche les voix françaises disponibl
 « Voix utilisée », vérifier le volume Multimédia, sinon : Paramètres Android → Paramètres supplémentaires →
 Langues et saisie → Synthèse vocale → moteur « Services vocaux Google », langue Français, voix française téléchargée.
 
-Depuis la v2.2-0, si le moteur vocal de Chrome reste bloqué, ORIANE le relance tout seul et redit la phrase
-(journal : « 🔁 Voix bloquée… moteur relancé »). En mode mains libres, la voix attend que le micro soit libéré.
+Depuis la v2.2-0.1, ORIANE parle comme la v1 : avec la **voix Google de Chrome** si elle est listée, sinon avec
+la voix française par défaut de Chrome. Une liste de voix vide (fréquente sur Android) n'empêche plus de parler.
+Le réglage « Voix utilisée » reste disponible pour choisir une autre voix ; si elle échoue, la phrase est redite
+avec la voix de Chrome (journal : « 🔁 »). En mode mains libres, la voix attend que le micro soit libéré.
 
 ## Limites connues
 

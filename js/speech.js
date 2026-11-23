@@ -1,11 +1,19 @@
 // ORIANE — synthèse vocale (file avec priorités) et reconnaissance vocale.
 //
-// v2.2-0, voix muette sur Android : deux défauts de Chrome sont contournés.
-// 1. Moteur bloqué : après une phrase coupée ou un passage en arrière-plan, speechSynthesis peut rester
-//    « en cours » sans jamais parler ; toutes les phrases suivantes sont alors muettes. Si une phrase n'a
-//    pas démarré au bout de 3 s : cancel(), puis nouvel essai (avec le moteur par défaut du téléphone).
-//    Le moteur est aussi relancé (resume) s'il est en pause.
-// 2. Micro occupé : avec « Dis Oriane », la voix attend que l'écoute soit vraiment arrêtée (beforeSpeak).
+// Voix (v2.2-0.1, retour au principe de la v1 qui fonctionnait sur le téléphone) :
+// - par défaut, la voix française « Google » de Chrome si elle est listée ; sinon AUCUNE voix imposée :
+//   la phrase est envoyée en fr-FR et Chrome parle avec sa voix française par défaut. Une liste de voix
+//   vide (fréquent sur Android) n'empêche donc jamais de parler ;
+// - une phrase n'est jamais coupée parce que Chrome n'a pas signalé son début (certains Android ne le
+//   font pas) : seuls la fin, une vraie erreur ou le filet de sécurité terminent une phrase ;
+// - vraie erreur avant le début avec une voix imposée : un nouvel essai sans voix imposée ;
+// - moteur en pause (arrière-plan) : relancé ; « Dis Oriane » : la voix attend que le micro soit libéré.
+
+/** Voix « Google » en français (celle de Chrome), en fr-FR de préférence. */
+export function googleFrenchVoice(voices) {
+  const fr = voices.filter((v) => /^fr/i.test(v.lang) && /google/i.test(v.name));
+  return fr.find((v) => /^fr[-_]FR/i.test(v.lang)) || fr[0] || null;
+}
 
 /**
  * File de messages parlés.
@@ -26,15 +34,14 @@ export class Voice {
     this.voices = [];
     this.preferredURI = '';
     this.onerror = null; // (code, texte) : échec de la synthèse
-    this.onrecover = null; // (code, texte) : phrase muette rattrapée par un nouvel essai
+    this.onrecover = null; // (code, texte) : erreur rattrapée par un nouvel essai sans voix imposée
     this.beforeSpeak = null; // async () : à attendre avant de parler (libérer le micro)
     this.failures = 0;
     this.successes = 0;
     this.recoveries = 0;
-    this.startTimeout = 3000; // ms sans démarrage avant de relancer le moteur
     if (this.supported) {
       const load = () => {
-        this.voices = speechSynthesis.getVoices();
+        this.voices = speechSynthesis.getVoices() || [];
         this.pick();
         this.onvoices?.(this.voices);
       };
@@ -43,19 +50,22 @@ export class Voice {
     }
   }
 
-  /** Voix françaises disponibles (locales d'abord : elles marchent sans réseau). */
+  /** Voix françaises listées par Chrome (Google d'abord). */
   get frenchVoices() {
     return this.voices
       .filter((v) => /^fr/i.test(v.lang))
-      .sort((a, b) => Number(b.localService) - Number(a.localService) || Number(/fr[-_]FR/i.test(b.lang)) - Number(/fr[-_]FR/i.test(a.lang)));
+      .sort((a, b) => Number(/google/i.test(b.name)) - Number(/google/i.test(a.name)) || Number(/^fr[-_]FR/i.test(b.lang)) - Number(/^fr[-_]FR/i.test(a.lang)));
   }
 
-  /** Choisit la voix : celle demandée, sinon une voix française locale, sinon aucune (moteur par défaut). */
+  /**
+   * Choisit la voix : celle demandée dans les réglages si elle existe ; sinon (automatique) la voix
+   * Google française ; sinon aucune (Chrome choisit sa voix française par défaut).
+   */
   pick() {
-    const pref = this.preferredURI && this.voices.find((v) => v.voiceURI === this.preferredURI);
+    const pref = this.preferredURI && this.preferredURI !== 'system' && this.voices.find((v) => v.voiceURI === this.preferredURI);
     if (pref) return (this.voice = pref);
     if (this.preferredURI === 'system') return (this.voice = null);
-    this.voice = this.frenchVoices[0] || null;
+    this.voice = googleFrenchVoice(this.voices);
     return this.voice;
   }
 
@@ -69,7 +79,7 @@ export class Voice {
       supported: this.supported,
       total: this.voices.length,
       french: this.frenchVoices.map((v) => `${v.name} (${v.lang}${v.localService ? ', locale' : ', en ligne'})`),
-      chosen: this.voice ? `${this.voice.name} (${this.voice.lang})` : 'moteur par défaut du téléphone',
+      chosen: this.voice ? `${this.voice.name} (${this.voice.lang})` : 'voix française par défaut de Chrome',
       failures: this.failures,
       successes: this.successes,
       recoveries: this.recoveries,
@@ -82,6 +92,23 @@ export class Voice {
     if (!this.supported) return 'absent';
     const ss = speechSynthesis;
     return `parle ${ss.speaking ? 'oui' : 'non'}, en attente ${ss.pending ? 'oui' : 'non'}, en pause ${ss.paused ? 'oui' : 'non'}`;
+  }
+
+  /**
+   * À appeler lors d'un appui de l'utilisateur : Chrome sur Android n'autorise la voix qu'après un
+   * geste. Une phrase vide et muette « déverrouille » la synthèse pour les annonces suivantes.
+   */
+  unlock() {
+    if (!this.supported || this._unlocked) return;
+    this._unlocked = true;
+    try {
+      const u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      u.lang = 'fr-FR';
+      speechSynthesis.speak(u);
+    } catch {
+      /* sans conséquence */
+    }
   }
 
   say(text, { priority = 1, interrupt = false, key = null } = {}) {
@@ -157,7 +184,7 @@ export class Voice {
       if (this._token !== token || this.current !== item) return;
       this._waiting = false;
     }
-    this._speak(item, token, 0);
+    this._speak(item, token, this.voice);
   }
 
   /** Fin d'une phrase (dite, abandonnée ou en échec) : passe à la suivante. */
@@ -169,68 +196,52 @@ export class Voice {
     setTimeout(() => this._next(), 80);
   }
 
-  /** Un essai de la phrase ; attempt 1 = nouvel essai après un moteur bloqué. */
-  _speak(item, token, attempt) {
+  /** Un essai de la phrase, avec la voix donnée (null = voix française par défaut de Chrome). */
+  _speak(item, token, voice) {
     const ss = speechSynthesis;
-    const alive = () => this._token === token && this.current === item && !att.stale;
-    const att = { stale: false };
+    const att = { over: false };
+    const alive = () => !att.over && this._token === token && this.current === item;
     if (ss.paused) ss.resume();
     const u = new SpeechSynthesisUtterance(item.text);
     u.lang = 'fr-FR';
-    // Nouvel essai : moteur par défaut du téléphone, au cas où la voix choisie serait en cause.
-    if (this.voice && attempt === 0) u.voice = this.voice;
+    if (voice) u.voice = voice;
     u.rate = this.rate;
     let started = false;
-    let endTimer = null;
     const finish = () => {
       if (!alive()) return;
-      att.stale = true;
-      clearTimeout(endTimer);
-      clearTimeout(startTimer);
+      att.over = true;
+      clearTimeout(safety);
       this._done(item, token);
-    };
-    const retryOrFail = (code) => {
-      if (!alive()) return;
-      att.stale = true;
-      clearTimeout(endTimer);
-      clearTimeout(startTimer);
-      if (attempt === 0) {
-        this.recoveries++;
-        this.onrecover?.(code, item.text);
-        ss.cancel(); // débloque la file de Chrome
-        setTimeout(() => {
-          if (this._token === token && this.current === item) this._speak(item, token, 1);
-        }, 250);
-      } else {
-        this.failures++;
-        this.onerror?.(code, item.text);
-        ss.cancel();
-        this._done(item, token);
-      }
     };
     u.onstart = () => {
       if (!alive()) return;
       started = true;
-      clearTimeout(startTimer);
       this.successes++;
-      // Filet de sécurité : Chrome Android oublie parfois l'événement de fin.
-      endTimer = setTimeout(finish, 2500 + (item.text.length * 110) / this.rate);
     };
     u.onend = finish;
     u.onerror = (e) => {
-      if (e.error === 'interrupted' || e.error === 'canceled') return finish();
-      if (started) {
-        this.failures++;
-        this.onerror?.(e.error || 'erreur', item.text);
-        return finish();
+      if (!alive()) return;
+      const code = e.error || 'erreur';
+      if (code === 'interrupted' || code === 'canceled') return finish();
+      // Vraie erreur avant le début avec une voix imposée : nouvel essai avec la voix de Chrome.
+      if (!started && voice) {
+        att.over = true;
+        clearTimeout(safety);
+        this.recoveries++;
+        this.onrecover?.(code, item.text);
+        setTimeout(() => {
+          if (this._token === token && this.current === item) this._speak(item, token, null);
+        }, 150);
+        return;
       }
-      retryOrFail(e.error || 'erreur');
+      this.failures++;
+      this.onerror?.(code, item.text);
+      finish();
     };
-    // Aucune voix n'a démarré : moteur bloqué, voix absente… → nouvel essai, puis échec signalé.
-    const startTimer = setTimeout(() => {
-      if (!started) retryOrFail('no-start');
-    }, this.startTimeout);
     ss.speak(u);
+    // Filet de sécurité (comme en v1) : Chrome Android oublie parfois l'événement de fin.
+    // La phrase n'est pas coupée : on passe seulement à la suivante dans notre file.
+    const safety = setTimeout(finish, 2500 + (item.text.length * 110) / this.rate);
   }
 }
 
